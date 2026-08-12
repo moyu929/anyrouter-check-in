@@ -1,5 +1,6 @@
 # AnyRouter 多账号自动签到
 
+[![AnyRouter 自动签到](https://github.com/moyu929/anyrouter-check-in/actions/workflows/checkin.yml/badge.svg)](https://github.com/moyu929/anyrouter-check-in/actions/workflows/checkin.yml)
 [![GitHub Actions](https://github.com/moyu929/anyrouter-check-in/workflows/PR%20Quality%20Checks/badge.svg)](https://github.com/moyu929/anyrouter-check-in/actions)
 [![codecov](https://codecov.io/gh/moyu929/anyrouter-check-in/branch/main/graph/badge.svg)](https://codecov.io/gh/moyu929/anyrouter-check-in)
 [![pre-commit.ci status](https://results.pre-commit.ci/badge/github/moyu929/anyrouter-check-in/main.svg)](https://results.pre-commit.ci/latest/github/moyu929/anyrouter-check-in/main)
@@ -17,18 +18,18 @@
 
 ### 1.1 目录结构
 
-| 路径 | 职责 |
-|------|------|
-| `checkin.py` | 入口与编排：加载配置 → 逐账号登录/签到 → 汇总余额变化 → 推送通知 → 决定退出码 |
-| `utils/config.py` | `ProviderConfig` / `AccountConfig` 数据类，解析 `PROVIDERS` 与 `ANYROUTER_ACCOUNTS` |
-| `utils/http_client.py` | 统一 httpx 客户端工厂（UA、Client Hints、HTTP/2、代理）与指数退避重试 |
-| `utils/browser.py` | CloakBrowser 启动、登录页导航、邮箱表单填写、登录态判定、调试截图 |
-| `utils/popups.py` | 关闭站点公告弹窗（Playwright 定位 + JS 兜底），并保护登录表单不被误关 |
-| `utils/proxy.py` | 按提供商 `use_proxy` 读取代理、连通性探测与直连回退 |
-| `utils/gptgod.py` | GPTGod 纯 API 分支：`_jztz` 签名算法与设备指纹持久化 |
-| `utils/notify.py` | 9 个通知渠道，逐个独立发送、互不阻塞 |
-| `utils/debug.py` | 统一日志前缀与 `DEBUG_MODE` 开关 |
-| `scripts/setup_mihomo_proxy.sh` | CI 内下载 mihomo、拉取订阅、启动本地代理并探测节点 |
+| 路径                            | 职责                                                                                |
+| ------------------------------- | ----------------------------------------------------------------------------------- |
+| `checkin.py`                    | 入口与编排：加载配置 → 逐账号登录/签到 → 汇总余额变化 → 推送通知 → 决定退出码       |
+| `utils/config.py`               | `ProviderConfig` / `AccountConfig` 数据类，解析 `PROVIDERS` 与 `ANYROUTER_ACCOUNTS` |
+| `utils/http_client.py`          | 统一 httpx 客户端工厂（UA、Client Hints、HTTP/2、代理）与指数退避重试               |
+| `utils/browser.py`              | CloakBrowser 启动、登录页导航、邮箱表单填写、登录态判定、调试截图                   |
+| `utils/popups.py`               | 关闭站点公告弹窗（Playwright 定位 + JS 兜底），并保护登录表单不被误关               |
+| `utils/proxy.py`                | 按提供商 `use_proxy` 读取代理、连通性探测与直连回退                                 |
+| `utils/gptgod.py`               | GPTGod 纯 API 分支：`_jztz` 签名算法与设备指纹持久化                                |
+| `utils/notify.py`               | 9 个通知渠道，逐个独立发送、互不阻塞                                                |
+| `utils/debug.py`                | 统一日志前缀与 `DEBUG_MODE` 开关                                                    |
+| `scripts/setup_mihomo_proxy.sh` | CI 内下载 mihomo、拉取订阅、启动本地代理并探测节点                                  |
 
 ### 1.2 执行流程
 
@@ -53,20 +54,20 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
 
 ### 1.3 签到分支（按逻辑方式划分）
 
-| 逻辑分类 | 实现路径 | 是否需要浏览器 | 是否需要签名 | 签到触发 | 适用提供商 |
-|---------|---------|:------------:|:-----------:|:--------:|-----------|
-| **浏览器邮箱登录签到** | 启动浏览器 → 填写邮箱密码 → 获取 cookies → 手动 POST 签到 | 是 | 否 | 手动 | `anyrouter`（邮箱密码模式） |
-| **Session cookies 签到** | 直接使用用户提供的 cookies → 获取 WAF cookies → 签到 | 仅 WAF 绕过时 | 否 | 手动/自动 | `anyrouter`（Session 模式）、自定义 |
-| **GitHub OAuth 重放签到** | 重放 GitHub OAuth 授权流程 → 登录即触发签到 | 否 | 否 | 自动 | `agentrouter` |
-| **纯 API 签名签到** | API 登录 → 获取签名参数 → 生成 `_jztz` → 签到 | 否 | 是（`_jztz`） | 手动 | `gptgod` |
+| 逻辑分类                  | 实现路径                                                  | 是否需要浏览器 | 是否需要签名  | 签到触发  | 适用提供商                          |
+| ------------------------- | --------------------------------------------------------- | :------------: | :-----------: | :-------: | ----------------------------------- |
+| **浏览器邮箱登录签到**    | 启动浏览器 → 填写邮箱密码 → 获取 cookies → 手动 POST 签到 |       是       |      否       |   手动    | `anyrouter`（邮箱密码模式）         |
+| **Session cookies 签到**  | 直接使用用户提供的 cookies → 获取 WAF cookies → 签到      | 仅 WAF 绕过时  |      否       | 手动/自动 | `anyrouter`（Session 模式）、自定义 |
+| **GitHub OAuth 重放签到** | 重放 GitHub OAuth 授权流程 → 登录即触发签到               |       否       |      否       |   自动    | `agentrouter`                       |
+| **纯 API 签名签到**       | API 登录 → 获取签名参数 → 生成 `_jztz` → 签到             |       否       | 是（`_jztz`） |   手动    | `gptgod`                            |
 
 ### 1.4 签到分支（按提供商划分）
 
-| 提供商 | 认证方式 | 逻辑分类 | `use_proxy` 默认值 | 关键特性 |
-|--------|---------|---------|:----------------:|---------|
-| `anyrouter` | 邮箱+密码 / Session | 浏览器登录签到 / Session 签到 | `false` | NewAPI 标准，WAF 绕过，持久化浏览器 Profile |
-| `agentrouter` | GitHub OAuth | GitHub OAuth 重放签到 | `true` | 无需密码，登录即签到 |
-| `gptgod` | 邮箱+密码 | 纯 API 签名签到 | `false` | 无需浏览器，签名算法反爬，余额单位为积分 |
+| 提供商        | 认证方式            | 逻辑分类                      | `use_proxy` 默认值 | 关键特性                                    |
+| ------------- | ------------------- | ----------------------------- | :----------------: | ------------------------------------------- |
+| `anyrouter`   | 邮箱+密码 / Session | 浏览器登录签到 / Session 签到 |      `false`       | NewAPI 标准，WAF 绕过，持久化浏览器 Profile |
+| `agentrouter` | GitHub OAuth        | GitHub OAuth 重放签到         |       `true`       | 无需密码，登录即签到                        |
+| `gptgod`      | 邮箱+密码           | 纯 API 签名签到               |      `false`       | 无需浏览器，签名算法反爬，余额单位为积分    |
 
 > **代理生效范围**：代理按提供商粒度启用。即使已设置 `CHECKIN_PROXY_URL`，`use_proxy=false` 的提供商仍然直连；可通过 `PROVIDERS` 覆盖每个提供商的 `use_proxy`。
 
@@ -86,11 +87,11 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
 
 #### 2.2.1 各分支配置格式
 
-| 认证方式 | 适用提供商 | 配置示例 | 说明 |
-|---------|-----------|---------|------|
-| 邮箱+密码 | `anyrouter` / `gptgod` | `{"email":"user@ex.com","password":"pass"}` | 推荐，自动获取 cookies 与用户标识 |
-| Session | `anyrouter` | `{"cookies":{"session":"xxx"},"api_user":"12345"}` | 兼容旧版，需手动获取 cookies |
-| GitHub OAuth | `agentrouter` | `{"github_session":"your_github_user_session_cookie"}` | 需提供 GitHub 的 `user_session` cookie |
+| 认证方式     | 适用提供商             | 配置示例                                               | 说明                                   |
+| ------------ | ---------------------- | ------------------------------------------------------ | -------------------------------------- |
+| 邮箱+密码    | `anyrouter` / `gptgod` | `{"email":"user@ex.com","password":"pass"}`            | 推荐，自动获取 cookies 与用户标识      |
+| Session      | `anyrouter`            | `{"cookies":{"session":"xxx"},"api_user":"12345"}`     | 兼容旧版，需手动获取 cookies           |
+| GitHub OAuth | `agentrouter`          | `{"github_session":"your_github_user_session_cookie"}` | 需提供 GitHub 的 `user_session` cookie |
 
 #### 2.2.2 多账号混合配置示例
 
@@ -117,15 +118,15 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
 
 #### 2.2.3 账号配置字段说明
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `name` | string | 否 | 显示名称，默认 `Account N`；设为空字符串会导致配置校验失败 |
-| `provider` | string | 否 | 服务商标识，默认 `anyrouter` |
-| `email` | string | 条件 | 邮箱密码登录时必填 |
-| `password` | string | 条件 | 邮箱密码登录时必填 |
-| `github_session` | string | 条件 | GitHub OAuth 时必填 |
-| `cookies` | object / string | 条件 | Session 登录时必填，如 `{"session":"xxx"}`，也接受 `"a=1; b=2"` 字符串 |
-| `api_user` | string | 条件 | Session 登录时必填；邮箱密码与 OAuth 登录会自动获取，可省略 |
+| 字段             | 类型            | 必填 | 说明                                                                   |
+| ---------------- | --------------- | ---- | ---------------------------------------------------------------------- |
+| `name`           | string          | 否   | 显示名称，默认 `Account N`；设为空字符串会导致配置校验失败             |
+| `provider`       | string          | 否   | 服务商标识，默认 `anyrouter`                                           |
+| `email`          | string          | 条件 | 邮箱密码登录时必填                                                     |
+| `password`       | string          | 条件 | 邮箱密码登录时必填                                                     |
+| `github_session` | string          | 条件 | GitHub OAuth 时必填                                                    |
+| `cookies`        | object / string | 条件 | Session 登录时必填，如 `{"session":"xxx"}`，也接受 `"a=1; b=2"` 字符串 |
+| `api_user`       | string          | 条件 | Session 登录时必填；邮箱密码与 OAuth 登录会自动获取，可省略            |
 
 > **优先级**：同一账号同时配置了 `github_session`（且提供商为 OAuth）与 `email`/`password` 时，OAuth 优先；两者都没有才回退到 `cookies`。登录失败不会退回使用可能已过期的 `cookies`。
 
@@ -133,10 +134,10 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
 
 仅 Session 模式需要手动获取。登录站点后打开浏览器开发者工具 → Network，任选一个 API 请求：
 
-| 需要的值 | 获取位置 | 参考截图 |
-|---------|---------|---------|
-| `cookies.session` | 请求头 `Cookie` 中的 `session=...` | ![获取 session](./assets/request-session.png) |
-| `api_user` | 请求头 `new-api-user` 的值 | ![获取 api_user](./assets/request-api-user.png) |
+| 需要的值          | 获取位置                           | 参考截图                                        |
+| ----------------- | ---------------------------------- | ----------------------------------------------- |
+| `cookies.session` | 请求头 `Cookie` 中的 `session=...` | ![获取 session](./assets/request-session.png)   |
+| `api_user`        | 请求头 `new-api-user` 的值         | ![获取 api_user](./assets/request-api-user.png) |
 
 
 ### 2.3 启用 GitHub Actions
@@ -161,21 +162,21 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
 
 ### 3.1 配置字段
 
-| 字段 | 类型 | 必填 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| `domain` | string | 是 | — | 服务商域名，如 `https://example.com` |
-| `login_path` | string | 否 | `/login` | 登录页面路径 |
-| `sign_in_path` | string \| null | 否 | `/api/user/sign_in` | 签到 API 路径（设为 `null` 则查用户信息时自动签到） |
-| `user_info_path` | string | 否 | `/api/user/self` | 用户信息 API 路径 |
-| `api_user_key` | string \| null | 否 | `new-api-user` | 用户标识请求头名称；设为 `null` 则不发送该请求头 |
-| `bypass_method` | string \| null | 否 | `null` | WAF 绕过方式：`"waf_cookies"` 或 `null` |
-| `waf_cookie_names` | array | 条件 | — | WAF 绕过所需 cookie 名称列表；为空或全部非法时 `bypass_method` 自动降级为 `null` |
-| `use_proxy` | bool | 否 | `false` | 该提供商是否走代理 |
-| `persist_profile` | bool | 否 | `false` | 是否复用持久化浏览器 Profile（内置 `anyrouter` 为 `true`），可减少重复登录与风控 |
-| `auth_method` | string \| null | 否 | `null` | `"oauth"` 走 GitHub OAuth 重放，`"gptgod"` 走 GPTGod 纯 API 分支；`null` 时按账号字段自动判断 |
-| `oauth_client_id` | string | 条件 | — | `auth_method="oauth"` 时必填 |
-| `oauth_state_path` | string | 否 | `/api/oauth/state` | OAuth 第 1 步取 state 的接口路径 |
-| `oauth_callback_path` | string | 否 | `/api/oauth/github` | OAuth 第 3 步回调接口路径 |
+| 字段                  | 类型           | 必填 | 默认值              | 说明                                                                                          |
+| --------------------- | -------------- | ---- | ------------------- | --------------------------------------------------------------------------------------------- |
+| `domain`              | string         | 是   | —                   | 服务商域名，如 `https://example.com`                                                          |
+| `login_path`          | string         | 否   | `/login`            | 登录页面路径                                                                                  |
+| `sign_in_path`        | string \| null | 否   | `/api/user/sign_in` | 签到 API 路径（设为 `null` 则查用户信息时自动签到）                                           |
+| `user_info_path`      | string         | 否   | `/api/user/self`    | 用户信息 API 路径                                                                             |
+| `api_user_key`        | string \| null | 否   | `new-api-user`      | 用户标识请求头名称；设为 `null` 则不发送该请求头                                              |
+| `bypass_method`       | string \| null | 否   | `null`              | WAF 绕过方式：`"waf_cookies"` 或 `null`                                                       |
+| `waf_cookie_names`    | array          | 条件 | —                   | WAF 绕过所需 cookie 名称列表；为空或全部非法时 `bypass_method` 自动降级为 `null`              |
+| `use_proxy`           | bool           | 否   | `false`             | 该提供商是否走代理                                                                            |
+| `persist_profile`     | bool           | 否   | `false`             | 是否复用持久化浏览器 Profile（内置 `anyrouter` 为 `true`），可减少重复登录与风控              |
+| `auth_method`         | string \| null | 否   | `null`              | `"oauth"` 走 GitHub OAuth 重放，`"gptgod"` 走 GPTGod 纯 API 分支；`null` 时按账号字段自动判断 |
+| `oauth_client_id`     | string         | 条件 | —                   | `auth_method="oauth"` 时必填                                                                  |
+| `oauth_state_path`    | string         | 否   | `/api/oauth/state`  | OAuth 第 1 步取 state 的接口路径                                                              |
+| `oauth_callback_path` | string         | 否   | `/api/oauth/github` | OAuth 第 3 步回调接口路径                                                                     |
 
 > `auth_method` 的字面量中还包含 `"email"`，但当前代码没有为它单独分支——邮箱密码登录是在账号同时配置了 `email` 与 `password` 时自动走的，无需显式设置。
 
@@ -201,39 +202,39 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
 
 ### 4.1 账号与提供商
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `ANYROUTER_ACCOUNTS` | — | **必填**，账号配置 JSON 数组，见 2.2 |
-| `PROVIDERS` | — | 自定义提供商 JSON 对象，见第 3 节 |
-| `DEBUG_MODE` | `false` | 调试模式，见第 7 节 |
-| `RETRY_TIMES` | `3` | HTTP 请求失败重试次数（5xx / 429 / 网络异常），设为 `0` 禁用重试 |
+| 变量                 | 默认值  | 说明                                                             |
+| -------------------- | ------- | ---------------------------------------------------------------- |
+| `ANYROUTER_ACCOUNTS` | —       | **必填**，账号配置 JSON 数组，见 2.2                             |
+| `PROVIDERS`          | —       | 自定义提供商 JSON 对象，见第 3 节                                |
+| `DEBUG_MODE`         | `false` | 调试模式，见第 7 节                                              |
+| `RETRY_TIMES`        | `3`     | HTTP 请求失败重试次数（5xx / 429 / 网络异常），设为 `0` 禁用重试 |
 
 ### 4.2 浏览器行为
 
 仅影响需要浏览器的分支（`anyrouter` 邮箱登录、WAF cookies 获取）。
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `CHECKIN_HEADLESS` | `true` | 是否无头运行。CI 中设为 `false` 并用 `xvfb-run` 提供虚拟显示，以降低无头特征 |
-| `CHECKIN_HUMANIZE` | `true` | 是否启用 CloakBrowser 拟人化操作 |
-| `CHECKIN_HUMANIZE_AGENTROUTER` | 跟随 `CHECKIN_HUMANIZE` | 仅覆盖 `agentrouter` 的拟人化开关 |
-| `CHECKIN_WAIT_TIMEOUT_MS` | `60000` | 登录等待超时（毫秒）。CI 中设为 `120000` |
-| `CHECKIN_BROWSER_PROFILE_DIR` | `.browser_profiles` | 持久化 Profile 根目录，实际路径为 `<根目录>/<提供商>/<账号名>` |
-| `CHECKIN_SCREENSHOT_DIR` | `checkin_screenshots` | 调试截图输出目录 |
-| `CLOAKBROWSER_BINARY_PATH` | — | 指向本地浏览器可执行文件，跳过 `cloakbrowser install` |
+| 变量                           | 默认值                  | 说明                                                                         |
+| ------------------------------ | ----------------------- | ---------------------------------------------------------------------------- |
+| `CHECKIN_HEADLESS`             | `true`                  | 是否无头运行。CI 中设为 `false` 并用 `xvfb-run` 提供虚拟显示，以降低无头特征 |
+| `CHECKIN_HUMANIZE`             | `true`                  | 是否启用 CloakBrowser 拟人化操作                                             |
+| `CHECKIN_HUMANIZE_AGENTROUTER` | 跟随 `CHECKIN_HUMANIZE` | 仅覆盖 `agentrouter` 的拟人化开关                                            |
+| `CHECKIN_WAIT_TIMEOUT_MS`      | `60000`                 | 登录等待超时（毫秒）。CI 中设为 `120000`                                     |
+| `CHECKIN_BROWSER_PROFILE_DIR`  | `.browser_profiles`     | 持久化 Profile 根目录，实际路径为 `<根目录>/<提供商>/<账号名>`               |
+| `CHECKIN_SCREENSHOT_DIR`       | `checkin_screenshots`   | 调试截图输出目录                                                             |
+| `CLOAKBROWSER_BINARY_PATH`     | —                       | 指向本地浏览器可执行文件，跳过 `cloakbrowser install`                        |
 
 > 布尔类变量接受 `1` / `true` / `yes` / `on`（不区分大小写），其余值均视为 false。
 
 ### 4.3 代理
 
-| 变量 | 默认值 | 作用位置 | 说明 |
-|------|--------|---------|------|
-| `PROXY_SUBSCRIPTION_URL` | — | CI 脚本 | Clash/Mihomo 订阅链接。**未设置则整个代理步骤跳过** |
-| `CHECKIN_PROXY_URL` | — | Python | 代理地址，如 `http://127.0.0.1:7890`。CI 中由代理脚本自动写入 `GITHUB_ENV` |
-| `PROXY_TEST_URL` | `https://www.gstatic.com/generate_204` | Python 与 CI 脚本 | 连通性探测地址。CI 中显式设为 `https://www.google.com/generate_204`，两侧默认值不同 |
-| `PROXY_PORT` | `7890` | CI 脚本 | mihomo 本地 mixed-port |
-| `MIHOMO_VERSION` | `v1.19.0` | CI 脚本 | mihomo 版本。当前 workflow 固定为 `v1.19.27` |
-| `PROXY_REQUIRED` | `false` | CI 脚本 | `true` 时代理不可用即让 workflow 失败退出；`false` 时降级为直连继续执行 |
+| 变量                     | 默认值                                 | 作用位置          | 说明                                                                                |
+| ------------------------ | -------------------------------------- | ----------------- | ----------------------------------------------------------------------------------- |
+| `PROXY_SUBSCRIPTION_URL` | —                                      | CI 脚本           | Clash/Mihomo 订阅链接。**未设置则整个代理步骤跳过**                                 |
+| `CHECKIN_PROXY_URL`      | —                                      | Python            | 代理地址，如 `http://127.0.0.1:7890`。CI 中由代理脚本自动写入 `GITHUB_ENV`          |
+| `PROXY_TEST_URL`         | `https://www.gstatic.com/generate_204` | Python 与 CI 脚本 | 连通性探测地址。CI 中显式设为 `https://www.google.com/generate_204`，两侧默认值不同 |
+| `PROXY_PORT`             | `7890`                                 | CI 脚本           | mihomo 本地 mixed-port                                                              |
+| `MIHOMO_VERSION`         | `v1.19.0`                              | CI 脚本           | mihomo 版本。当前 workflow 固定为 `v1.19.27`                                        |
+| `PROXY_REQUIRED`         | `false`                                | CI 脚本           | `true` 时代理不可用即让 workflow 失败退出；`false` 时降级为直连继续执行             |
 
 ### 4.4 通知
 
@@ -263,17 +264,17 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
 
 支持多通道同时推送，只需配置对应的环境变量即可。每个通道独立发送，单个通道失败不会影响其他通道。
 
-| 通知方式 | 所需环境变量 | 说明 |
-|---------|-------------|------|
-| **邮箱 (SMTP)** | `EMAIL_USER` + `EMAIL_PASS` + `EMAIL_TO` | SMTP 服务器默认由邮箱域名推导（`smtp.<域名>`，465 端口 SSL）。可选 `EMAIL_SENDER`、`CUSTOM_SMTP_SERVER` |
-| **钉钉机器人** | `DINGDING_WEBHOOK` | 群机器人 Webhook 地址 |
-| **飞书机器人** | `FEISHU_WEBHOOK` | 群机器人 Webhook 地址 |
-| **企业微信机器人** | `WEIXIN_WEBHOOK` | 群机器人 Webhook 地址 |
-| **PushPlus** | `PUSHPLUS_TOKEN` | [PushPlus 官网](http://www.pushplus.plus) |
-| **Server 酱** | `SERVERPUSHKEY` | [Server 酱官网](https://sct.ftqq.com) |
-| **Telegram Bot** | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Telegram Bot Token 和 Chat ID |
-| **Gotify** | `GOTIFY_URL` + `GOTIFY_TOKEN` | 自建 Gotify 服务。可选 `GOTIFY_PRIORITY`（自动裁剪到 1-10，默认 9） |
-| **Bark** | `BARK_KEY` | iOS Bark 推送。可选 `BARK_SERVER`（默认 `https://api.day.app`） |
+| 通知方式           | 所需环境变量                              | 说明                                                                                                    |
+| ------------------ | ----------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| **邮箱 (SMTP)**    | `EMAIL_USER` + `EMAIL_PASS` + `EMAIL_TO`  | SMTP 服务器默认由邮箱域名推导（`smtp.<域名>`，465 端口 SSL）。可选 `EMAIL_SENDER`、`CUSTOM_SMTP_SERVER` |
+| **钉钉机器人**     | `DINGDING_WEBHOOK`                        | 群机器人 Webhook 地址                                                                                   |
+| **飞书机器人**     | `FEISHU_WEBHOOK`                          | 群机器人 Webhook 地址                                                                                   |
+| **企业微信机器人** | `WEIXIN_WEBHOOK`                          | 群机器人 Webhook 地址                                                                                   |
+| **PushPlus**       | `PUSHPLUS_TOKEN`                          | [PushPlus 官网](http://www.pushplus.plus)                                                               |
+| **Server 酱**      | `SERVERPUSHKEY`                           | [Server 酱官网](https://sct.ftqq.com)                                                                   |
+| **Telegram Bot**   | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Telegram Bot Token 和 Chat ID                                                                           |
+| **Gotify**         | `GOTIFY_URL` + `GOTIFY_TOKEN`             | 自建 Gotify 服务。可选 `GOTIFY_PRIORITY`（自动裁剪到 1-10，默认 9）                                     |
+| **Bark**           | `BARK_KEY`                                | iOS Bark 推送。可选 `BARK_SERVER`（默认 `https://api.day.app`）                                         |
 
 > **日志说明**：未配置的通道会在日志中打印一行 `[渠道]: Message push failed! Reason: ... not configured`。这是预期输出，不代表签到失败——只要有任一通道配置正确并发送成功即可。
 
@@ -295,10 +296,10 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
 
 ## 8. 退出码
 
-| 退出码 | 含义 |
-|:-----:|------|
-| `0` | 至少一个账号签到成功 |
-| `1` | 全部账号签到失败、账号配置加载失败、或运行时未捕获异常 |
+| 退出码 | 含义                                                   |
+| :----: | ------------------------------------------------------ |
+|  `0`   | 至少一个账号签到成功                                   |
+|  `1`   | 全部账号签到失败、账号配置加载失败、或运行时未捕获异常 |
 
 > 多账号场景下，只要有一个成功就返回 `0`，Actions 显示为绿色；失败账号的详情通过通知与日志体现。
 
@@ -323,13 +324,13 @@ uv run pytest tests/ --cov=.
 
 ### 9.1 代码质量
 
-| 工具 | 用途 | 命令 |
-|------|------|------|
-| Ruff | 代码风格检查与格式化 | `uv run ruff check .` / `uv run ruff format .` |
-| MyPy | 静态类型检查 | `uv run mypy .` |
-| Bandit | 安全漏洞扫描 | `uv run bandit -r . -c pyproject.toml` |
-| Pytest | 自动化测试 | `uv run pytest tests/ --cov=.` |
-| pre-commit | 提交前自动检查 | `uv run pre-commit install` |
+| 工具       | 用途                 | 命令                                           |
+| ---------- | -------------------- | ---------------------------------------------- |
+| Ruff       | 代码风格检查与格式化 | `uv run ruff check .` / `uv run ruff format .` |
+| MyPy       | 静态类型检查         | `uv run mypy .`                                |
+| Bandit     | 安全漏洞扫描         | `uv run bandit -r . -c pyproject.toml`         |
+| Pytest     | 自动化测试           | `uv run pytest tests/ --cov=.`                 |
+| pre-commit | 提交前自动检查       | `uv run pre-commit install`                    |
 
 > 代码风格：行宽 120、单引号、**Tab 缩进**。`pyproject.toml` 中 `fix = true`，`ruff check .` 会自动修改文件；只想查看问题请加 `--no-fix`。
 
@@ -347,16 +348,16 @@ uv run pytest tests/ --cov=.
 
 ## 10. 故障排除
 
-| 现象 | 可能原因 | 解决方法 |
-|------|---------|---------|
-| 401 错误 | cookies 过期 | 重新获取 cookies 或改用邮箱密码登录 |
-| 1040 (08004) | 服务商数据库连接数超限 | 等待后重试，官方问题 |
-| WAF 拦截（日志含 `aliyun_waf`） | GitHub Actions IP 被屏蔽 | 配置代理（`PROXY_SUBSCRIPTION_URL`） |
-| 签到成功但积分未变 | 今日已签到 | 检查日志 `已签到` 状态 |
-| 浏览器启动失败 | CloakBrowser 未安装 | `uv run python -m cloakbrowser install`，或用 `CLOAKBROWSER_BINARY_PATH` 指向本地浏览器 |
-| 日志刷出多条 `not configured` | 未配置的通知渠道 | 属正常输出，只要有一个渠道成功即可 |
-| 每次运行都收到通知 | `balance_hash.txt` 未保留 | CI 依赖缓存保存余额指纹，缓存失效时会被判为首次运行 |
-| OAuth 登录失败（401/403） | GitHub `user_session` 已失效 | 重新从浏览器复制 `user_session` cookie |
+| 现象                            | 可能原因                     | 解决方法                                                                                |
+| ------------------------------- | ---------------------------- | --------------------------------------------------------------------------------------- |
+| 401 错误                        | cookies 过期                 | 重新获取 cookies 或改用邮箱密码登录                                                     |
+| 1040 (08004)                    | 服务商数据库连接数超限       | 等待后重试，官方问题                                                                    |
+| WAF 拦截（日志含 `aliyun_waf`） | GitHub Actions IP 被屏蔽     | 配置代理（`PROXY_SUBSCRIPTION_URL`）                                                    |
+| 签到成功但积分未变              | 今日已签到                   | 检查日志 `已签到` 状态                                                                  |
+| 浏览器启动失败                  | CloakBrowser 未安装          | `uv run python -m cloakbrowser install`，或用 `CLOAKBROWSER_BINARY_PATH` 指向本地浏览器 |
+| 日志刷出多条 `not configured`   | 未配置的通知渠道             | 属正常输出，只要有一个渠道成功即可                                                      |
+| 每次运行都收到通知              | `balance_hash.txt` 未保留    | CI 依赖缓存保存余额指纹，缓存失效时会被判为首次运行                                     |
+| OAuth 登录失败（401/403）       | GitHub `user_session` 已失效 | 重新从浏览器复制 `user_session` cookie                                                  |
 
 ---
 

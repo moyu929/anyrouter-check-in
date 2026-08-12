@@ -1,5 +1,6 @@
 import sys
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -41,7 +42,7 @@ async def test_launch_login_context_uses_persistent_context_when_enabled(monkeyp
 		persist_profile=settings.persist_profile,
 	)
 
-	result = await launch_login_context(settings)
+	result: Any = await launch_login_context(settings)
 
 	assert result is context
 	assert calls['profile_dir'] == str(settings.profile_dir)
@@ -92,7 +93,7 @@ async def test_launch_login_context_closes_browser_for_ephemeral_context(monkeyp
 		persist_profile=settings.persist_profile,
 	)
 
-	context = await launch_login_context(settings)
+	context: Any = await launch_login_context(settings)
 	await context.close()
 
 	assert context.closed is True

@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
 from utils.debug import debug_print, is_debug_enabled
 from utils.popups import dismiss_popups, setup_popup_guard
@@ -225,14 +225,19 @@ async def launch_login_context(settings: BrowserLoginSettings, *, use_proxy: boo
 		from cloakbrowser import launch_persistent_context_async
 
 		settings.profile_dir.mkdir(parents=True, exist_ok=True)
-		return await launch_persistent_context_async(str(settings.profile_dir), **launch_kwargs)
+		return cast(
+			'BrowserContext',
+			await launch_persistent_context_async(str(settings.profile_dir), **launch_kwargs),
+		)
 
 	from cloakbrowser import launch_async
 
 	context_kwargs = {'viewport': launch_kwargs.pop('viewport')}
 	browser = await launch_async(**launch_kwargs)
 	context = await browser.new_context(**context_kwargs)
-	return _EphemeralBrowserContext(context, browser)
+	# _EphemeralBrowserContext 通过 __getattr__ 代理 BrowserContext 的全部接口，
+	# 额外在 close() 时连带关闭 browser。
+	return cast('BrowserContext', _EphemeralBrowserContext(context, browser))
 
 
 def get_screenshot_dir() -> Path:
@@ -295,7 +300,9 @@ async def wait_for_site_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS
 		print(f'[INFO] Dismissed {closed} popup dialog(s)')
 
 
-async def _wait_for_optional_load_state(page: Page, state: str, timeout_ms: int) -> bool:
+async def _wait_for_optional_load_state(
+	page: Page, state: Literal['domcontentloaded', 'load', 'networkidle'], timeout_ms: int
+) -> bool:
 	try:
 		await page.wait_for_load_state(state, timeout=timeout_ms)
 		return True
@@ -406,15 +413,6 @@ async def is_logged_in(page: Page) -> bool:
 			return False
 	except Exception:  # nosec B110
 		pass
-	return False
-
-
-async def wait_for_session_cookie(page: Page, timeout_ms: int = SESSION_WAIT_TIMEOUT_MS) -> bool:
-	deadline = time.monotonic() + timeout_ms / 1000
-	while time.monotonic() < deadline:
-		if await has_session_cookie(page):
-			return True
-		await asyncio.sleep(0.5)
 	return False
 
 

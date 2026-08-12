@@ -277,7 +277,7 @@ PR 会自动更新，无需创建新的 PR。
 
 如果你有任何问题：
 
-- 查看现有的 [Issues](https://github.com/millylee/anyrouter-check-in/issues)
+- 查看现有的 [Issues](https://github.com/moyu929/anyrouter-check-in/issues)
 - 创建新的 Issue 描述你的问题
 - 在 PR 中 @维护者 寻求帮助
 

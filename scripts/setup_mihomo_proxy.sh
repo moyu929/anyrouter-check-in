@@ -55,18 +55,54 @@ proxy-providers:
       interval: 300
       url: https://www.gstatic.com/generate_204
 
+# 按区域分组，自动选择该区域延迟最低的节点
 proxy-groups:
-  - name: CHECKIN
+  - name: 🇯🇵 日本
     type: url-test
     url: "${PROXY_TEST_URL}"
     interval: 300
-    tolerance: 150
+    tolerance: 100
     lazy: false
     use:
       - subscription
+    filter: "日本|JP|Japan|东京|Tokyo|大阪|Osaka"
+
+  - name: 🇸🇬 新加坡
+    type: url-test
+    url: "${PROXY_TEST_URL}"
+    interval: 300
+    tolerance: 100
+    lazy: false
+    use:
+      - subscription
+    filter: "新加坡|SG|Singapore"
+
+  - name: 🇭🇰 香港
+    type: url-test
+    url: "${PROXY_TEST_URL}"
+    interval: 300
+    tolerance: 100
+    lazy: false
+    use:
+      - subscription
+    filter: "香港|HK|Hong Kong|HongKong|HGC"
+
+# 回退链：日本 → 新加坡 → 香港
+# fallback 自动跳过不可用的组，选择第一个可用的
+  - name: AUTO
+    type: fallback
+    url: "${PROXY_TEST_URL}"
+    interval: 300
+    lazy: false
+    proxies:
+      - 🇯🇵 日本
+      - 🇸🇬 新加坡
+      - 🇭🇰 香港
 
 rules:
-  - MATCH,CHECKIN
+  # 订阅拉取直连，避免走代理自身形成循环依赖
+  - DOMAIN-KEYWORD,mjurl.com,DIRECT
+  - MATCH,AUTO
 EOF
 
 echo "[INFO] Starting mihomo on 127.0.0.1:${PROXY_PORT}..."

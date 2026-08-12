@@ -18,11 +18,15 @@ class ProviderConfig:
 	login_path: str = '/login'
 	sign_in_path: str | None = '/api/user/sign_in'
 	user_info_path: str = '/api/user/self'
-	api_user_key: str = 'new-api-user'
+	api_user_key: str | None = 'new-api-user'
 	bypass_method: Literal['waf_cookies'] | None = None
 	waf_cookie_names: List[str] | None = None
 	use_proxy: bool = False
 	persist_profile: bool = False
+	auth_method: Literal['email', 'oauth', 'gptgod'] | None = None
+	oauth_client_id: str | None = None
+	oauth_state_path: str = '/api/oauth/state'
+	oauth_callback_path: str = '/api/oauth/github'
 
 	def __post_init__(self):
 		required_waf_cookies = set()
@@ -61,6 +65,14 @@ class ProviderConfig:
 			waf_cookie_names=data.get('waf_cookie_names', defaults.waf_cookie_names if defaults else None),
 			use_proxy=data.get('use_proxy', default_use_proxy),
 			persist_profile=data.get('persist_profile', default_persist_profile),
+			auth_method=data.get('auth_method', defaults.auth_method if defaults else None),
+			oauth_client_id=data.get('oauth_client_id', defaults.oauth_client_id if defaults else None),
+			oauth_state_path=data.get(
+				'oauth_state_path', defaults.oauth_state_path if defaults else '/api/oauth/state'
+			),
+			oauth_callback_path=data.get(
+				'oauth_callback_path', defaults.oauth_callback_path if defaults else '/api/oauth/github'
+			),
 		)
 
 	def needs_waf_cookies(self) -> bool:
@@ -70,6 +82,10 @@ class ProviderConfig:
 	def needs_manual_check_in(self) -> bool:
 		"""判断是否需要手动调用签到接口"""
 		return self.sign_in_path is not None
+
+	def is_oauth(self) -> bool:
+		"""判断是否使用 OAuth 登录"""
+		return self.auth_method == 'oauth'
 
 
 @dataclass
@@ -98,13 +114,32 @@ class AppConfig:
 				name='agentrouter',
 				domain='https://agentrouter.org',
 				login_path='/login',
-				sign_in_path=None,  # 无需签到接口，查询用户信息时自动完成签到
+				sign_in_path=None,
 				user_info_path='/api/user/self',
 				api_user_key='new-api-user',
 				bypass_method='waf_cookies',
 				waf_cookie_names=['acw_tc'],
 				use_proxy=True,
 				persist_profile=False,
+				auth_method='oauth',
+				oauth_client_id='Ov23lidtiR4LeVZvVRNL',
+			),
+			'lyclaude': ProviderConfig(
+				name='lyclaude',
+				domain='https://free.lyclaude.site',
+				login_path='/login',
+				sign_in_path='/api/user/checkin',
+				user_info_path='/api/user/self',
+				api_user_key='new-api-user',
+			),
+			'gptgod': ProviderConfig(
+				name='gptgod',
+				domain='https://gptgod.online',
+				login_path='/login',
+				sign_in_path='/api/user/checkin',
+				user_info_path='/api/user/info',
+				api_user_key=None,
+				auth_method='gptgod',
 			),
 		}
 
@@ -155,6 +190,7 @@ class AccountConfig:
 	name: str | None = None
 	email: str | None = None
 	password: str | None = None
+	github_session: str | None = None
 
 	@classmethod
 	def from_dict(cls, data: dict, index: int) -> 'AccountConfig':
@@ -169,11 +205,16 @@ class AccountConfig:
 			name=name if name else None,
 			email=data.get('email'),
 			password=data.get('password'),
+			github_session=data.get('github_session'),
 		)
 
 	def has_login_credentials(self) -> bool:
 		"""是否配置了邮箱密码登录"""
 		return bool(self.email and self.password)
+
+	def has_oauth_credentials(self) -> bool:
+		"""是否配置了 OAuth 凭据（如 GitHub session）"""
+		return bool(self.github_session)
 
 	def get_display_name(self, index: int) -> str:
 		"""获取显示名称"""
@@ -205,19 +246,20 @@ def load_accounts_config() -> list[AccountConfig] | None:
 				print(f'ERROR: Account {i + 1} configuration format is incorrect')
 				return None
 
+			has_oauth = account_dict.get('github_session') is not None
 			if 'api_user' not in account_dict:
 				has_login = account_dict.get('email') and account_dict.get('password')
-				if not has_login:
+				if not has_login and not has_oauth:
 					print(
-						f'ERROR: Account {i + 1} missing required field (api_user) - only email+password login can omit it'
+						f'ERROR: Account {i + 1} missing required field (api_user) - only email+password or github_session login can omit it'
 					)
 					return None
 
 			has_cookies = 'cookies' in account_dict and account_dict['cookies']
 			has_login = account_dict.get('email') and account_dict.get('password')
 
-			if not has_cookies and not has_login:
-				print(f'ERROR: Account {i + 1} must have either cookies or email+password')
+			if not has_cookies and not has_login and not has_oauth:
+				print(f'ERROR: Account {i + 1} must have either cookies, email+password, or github_session')
 				return None
 
 			if 'name' in account_dict and not account_dict['name']:

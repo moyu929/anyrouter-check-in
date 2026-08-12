@@ -11,5 +11,7 @@ htmlcov
 balance_hash.txt
 .browser_profiles
 checkin_screenshots
+.device_fp
 
 .DS_Store
+static.cloudflareinsights.com/

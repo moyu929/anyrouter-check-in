@@ -1,17 +1,71 @@
-"""调试模式开关：控制敏感日志与调试产物（截图等）。"""
+"""统一日志模块 — 所有签到分支共享的日志输出。
+
+日志级别（由 DEBUG_MODE 环境变量控制，支持 true/1/yes）：
+  - 普通模式：仅输出 INFO / SUCCESS / WARN / FAILED，简洁
+  - 调试模式：额外输出 DEBUG 级别，含网络请求、响应体、截图路径等详细日志
+
+用法:
+  from utils.debug import log
+  log.info('开始处理 lyclaude')
+  log.debug('响应体: {...}')
+  log.success('签到成功，余额 $200')
+"""
 
 from __future__ import annotations
 
 import os
 
 
-def is_debug_enabled() -> bool:
-	"""是否开启调试模式，读取 DEBUG_MODE，默认 false。"""
+def _is_debug() -> bool:
+	"""是否开启调试模式。"""
 	raw = os.getenv('DEBUG_MODE', '').strip().lower()
 	return raw in {'1', 'true', 'yes', 'on'}
 
 
+class _Log:
+	"""统一日志输出，自动处理前缀和调试模式开关。"""
+
+	@staticmethod
+	def info(msg: str) -> None:
+		print(f'[INFO] {msg}')
+
+	@staticmethod
+	def success(msg: str) -> None:
+		print(f'[SUCCESS] {msg}')
+
+	@staticmethod
+	def warn(msg: str) -> None:
+		print(f'[WARN] {msg}')
+
+	@staticmethod
+	def failed(msg: str) -> None:
+		print(f'[FAILED] {msg}')
+
+	@staticmethod
+	def debug(msg: str) -> None:
+		"""仅在调试模式下输出。"""
+		if _is_debug():
+			print(f'[DEBUG] {msg}')
+
+	@staticmethod
+	def notify(msg: str) -> None:
+		"""通知相关日志（始终输出）。"""
+		print(f'[NOTIFY] {msg}')
+
+	@staticmethod
+	def stats(msg: str) -> None:
+		"""统计汇总日志（始终输出）。"""
+		print(f'[STATS] {msg}')
+
+
+log = _Log()
+
+
+def is_debug_enabled() -> bool:
+	return _is_debug()
+
+
 def debug_print(message: str) -> None:
-	"""仅在调试模式下输出日志。"""
-	if is_debug_enabled():
+	"""兼容旧版 debug_print 接口。"""
+	if _is_debug():
 		print(message)

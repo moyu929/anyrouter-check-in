@@ -126,12 +126,16 @@ class TestLoginWithGithubOauth:
 	async def test_waf_block_on_state_is_detected(self, run_oauth):
 		server = _OAuthServer(state_text='<html>aliyun_waf_aa</html>')
 
-		assert await run_oauth(server) is None
+		# WAF 拦截被视为节点问题，抛出 ProxyNodeIssue
+		with pytest.raises(checkin_module.ProxyNodeIssue):
+			await run_oauth(server)
 
 	async def test_state_http_error(self, run_oauth):
 		server = _OAuthServer(state_status=502)
 
-		assert await run_oauth(server) is None
+		# 5xx 重试耗尽后被视为节点问题，抛出 ProxyNodeIssue
+		with pytest.raises(checkin_module.ProxyNodeIssue):
+			await run_oauth(server)
 
 	async def test_state_non_json(self, run_oauth):
 		server = _OAuthServer(state_text='<html>not json</html>')
@@ -167,12 +171,16 @@ class TestLoginWithGithubOauth:
 	async def test_callback_http_error(self, run_oauth):
 		server = _OAuthServer(cb_status=500)
 
-		assert await run_oauth(server) is None
+		# 5xx 重试耗尽后被视为节点问题，抛出 ProxyNodeIssue
+		with pytest.raises(checkin_module.ProxyNodeIssue):
+			await run_oauth(server)
 
 	async def test_callback_waf_block(self, run_oauth):
 		server = _OAuthServer(cb_text='aliyun_waf_aa detected')
 
-		assert await run_oauth(server) is None
+		# WAF 拦截被视为节点问题，抛出 ProxyNodeIssue
+		with pytest.raises(checkin_module.ProxyNodeIssue):
+			await run_oauth(server)
 
 	async def test_callback_non_json(self, run_oauth):
 		server = _OAuthServer(cb_text='<html>oops</html>')

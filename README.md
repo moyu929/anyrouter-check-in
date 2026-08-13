@@ -26,10 +26,11 @@
 | `utils/browser.py`              | CloakBrowser 启动、登录页导航、邮箱表单填写、登录态判定、调试截图                   |
 | `utils/popups.py`               | 关闭站点公告弹窗（Playwright 定位 + JS 兜底），并保护登录表单不被误关               |
 | `utils/proxy.py`                | 按提供商 `use_proxy` 读取代理、连通性探测与直连回退                                 |
+| `utils/proxy_selector.py`       | mihomo REST API 节点选择器：按区域优先级选最低延迟可用节点，维护全局排除集合        |
 | `utils/gptgod.py`               | GPTGod 纯 API 分支：`_jztz` 签名算法与设备指纹持久化                                |
 | `utils/notify.py`               | 9 个通知渠道，逐个独立发送、互不阻塞                                                |
 | `utils/debug.py`                | 统一日志前缀与 `DEBUG_MODE` 开关                                                    |
-| `scripts/setup_mihomo_proxy.sh` | CI 内下载 mihomo、拉取订阅、启动本地代理并探测节点                                  |
+| `scripts/setup_mihomo_proxy.sh` | CI 内下载 mihomo、生成配置（含 REST API）、启动本地代理并探测节点                  |
 
 ### 1.2 执行流程
 
@@ -235,6 +236,9 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
 | `PROXY_PORT`             | `7890`                                 | CI 脚本           | mihomo 本地 mixed-port                                                              |
 | `MIHOMO_VERSION`         | `v1.19.0`                              | CI 脚本           | mihomo 版本。当前 workflow 固定为 `v1.19.27`                                        |
 | `PROXY_REQUIRED`         | `false`                                | CI 脚本           | `true` 时代理不可用即让 workflow 失败退出；`false` 时降级为直连继续执行             |
+| `PROXY_RETRY_TIMES`      | `3`                                    | Python            | 代理节点问题（WAF/5xx/超时）时，切换节点重试的最多次数，含最后一次直连兜底         |
+| `MIHOMO_CONTROLLER`      | —                                      | Python            | mihomo REST API 地址，由代理脚本自动写入 `GITHUB_ENV`，无需手动设置                |
+| `MIHOMO_CONTROLLER_PORT` | `9090`                                 | CI 脚本           | mihomo REST API 端口，可覆盖默认值                                                  |
 
 ### 4.4 通知
 
@@ -246,13 +250,45 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
 
 当 GitHub Actions IP 被 WAF 屏蔽或不稳定时，可配置代理。只需设置 `PROXY_SUBSCRIPTION_URL`，workflow 会自动下载 mihomo、生成配置、启动本地代理，并把地址写入 `CHECKIN_PROXY_URL`。
 
-### 5.1 回退机制
+首次启动前会检测是否存在 `use_proxy=true` 的账号，若全部账号均不使用代理，则跳过整个代理初始化流程。
+
+### 5.1 节点选择器
+
+代理节点由 Python 节点选择器主动控制，不再依赖 mihomo 自动测速切换，避免中途切换影响进行中的签到任务。
+
+选择逻辑如下：
+
+```
+1. 🇯🇵 日本 组内并行测速 → 选延迟最低节点 → 连通性验证 → 切换
+   ├─ 不通 → 排除该节点 → 选组内次低延迟节点 → 重试
+   └─ 组内全部排除 → 进入 🇸🇬 新加坡
+2. 🇸🇬 新加坡 组内同逻辑
+   └─ 全部排除 → 进入 🇭🇰 香港
+3. 🇭🇰 香港 组内同逻辑
+   └─ 全部排除 → 返回 None（该账号尝试直连兜底）
+```
+
+- 节点选择器维护**全局排除集合**，一旦某节点因 WAF 拦截 / 超时 / 连通性失败被排除，后续所有账号与重试不再选择该节点。
+- 选择过程包含完整日志，用户可通过日志跟踪节点切换过程。
+
+### 5.2 签到重试
+
+使用代理的账号签到遇到以下问题时，自动切换节点重试（最多 3 次）：
+
+- 阿里云 WAF 拦截（响应体含 `aliyun_waf_aa`）
+- 5xx 服务端错误
+- 网络异常（超时 / 连接断开 / DNS 解析失败）
+- 节点连通性验证失败
+
+若节点选择器已无可用节点，最后一次尝试**直连目标网站**。重试仍失败则放弃该账号，继续下一账号。
+
+### 5.3 回退机制
 
 ```
 🇯🇵 日本 → 🇸🇬 新加坡 → 🇭🇰 香港 → 直连
 ```
 
-- **Mihomo 层**：fallback 组自动跳过不可用区域，选择第一个可用的。
+- **节点选择器**：按区域顺序，区域内并行测速选最低延迟节点，逐节点验证连通性，不通则排除并换下一个。
 - **Python 层**：进程内首次用到代理时做一次连通性探测并缓存结果；探测失败则该次运行全程直连，并在日志中打印 `代理 ... 不可达，回退到直连`。
 - **提供商层**：`use_proxy=false` 的提供商不读取代理地址、不做探测，始终直连。
 

@@ -1,12 +1,16 @@
 """代理开关与 HTTP 客户端重试测试（全离线，用 MockTransport 拦截，不出网）。"""
 
+import urllib.parse
+
 import httpx
 import pytest
 
 from utils import proxy as proxy_module
+from utils.config import AccountConfig, AppConfig, ProviderConfig
 from utils.http_client import (
 	API_HEADERS,
 	DEFAULT_RETRY_TIMES,
+	_redact_url,
 	create_client,
 	get_retry_times,
 	request_with_retry,
@@ -16,6 +20,7 @@ from utils.proxy import (
 	get_proxy_server,
 	get_proxy_test_url,
 	is_proxy_configured,
+	needs_proxy,
 	reset_proxy_cache,
 )
 
@@ -303,3 +308,63 @@ class TestRequestWithRetry:
 
 		assert seen['body'] == b'{"a":1}'
 		assert seen['header'] == 'yes'
+
+
+class TestNeedsProxy:
+	@staticmethod
+	def _config(providers: dict) -> AppConfig:
+		return AppConfig(providers={k: ProviderConfig(name=k, domain='https://x.com', use_proxy=v) for k, v in providers.items()})
+
+	def test_true_when_any_used_provider_uses_proxy(self):
+		app = self._config({'a': True, 'b': False})
+		accounts = [AccountConfig(cookies={'s': '1'}, provider='b'), AccountConfig(cookies={'s': '2'}, provider='a')]
+		assert needs_proxy(app, accounts) is True
+
+	def test_false_when_all_providers_direct(self):
+		app = self._config({'a': False, 'b': False})
+		accounts = [AccountConfig(cookies={'s': '1'}, provider='a'), AccountConfig(cookies={'s': '2'}, provider='b')]
+		assert needs_proxy(app, accounts) is False
+
+	def test_false_when_provider_not_found(self):
+		app = self._config({'a': True})
+		accounts = [AccountConfig(cookies={'s': '1'}, provider='missing')]
+		assert needs_proxy(app, accounts) is False
+
+	def test_false_when_no_accounts(self):
+		assert needs_proxy(self._config({'a': True}), []) is False
+
+
+class TestRedactUrl:
+	def test_redacts_oauth_code_and_state(self):
+		url = 'https://example.com/api/oauth/github?code=secretcode&state=somestate&mode=login'
+		red = _redact_url(url)
+		# 解码后检查，避免 URL 编码的 <redacted> 影响判断
+		decoded = urllib.parse.unquote(red)
+		assert 'secretcode' not in decoded
+		assert 'somestate' not in decoded
+		assert 'code=' in decoded and 'state=' in decoded
+		assert 'mode=login' in decoded
+
+	def test_redacts_token_and_keys(self):
+		# 使用与参数名不重叠的独特测试值
+		red = _redact_url('https://x.com?a=1&token=tokabc123&_k=keyxyz789&user_session=usrSess456')
+		decoded = urllib.parse.unquote(red)
+		assert 'tokabc123' not in decoded
+		assert 'keyxyz789' not in decoded
+		assert 'usrSess456' not in decoded
+		assert 'a=1' in decoded
+
+	def test_returns_url_unchanged_without_query(self):
+		url = 'https://example.com/path'
+		assert _redact_url(url) == url
+
+	def test_returns_url_unchanged_without_sensitive_params(self):
+		url = 'https://example.com/path?a=1&b=2'
+		assert _redact_url(url) == url
+
+	def test_case_insensitive_sensitive_param_names(self):
+		red = _redact_url('https://x.com?Code=ABC&State=XYZ&Token=123')
+		decoded = urllib.parse.unquote(red)
+		assert 'ABC' not in decoded
+		assert 'XYZ' not in decoded
+		assert '123' not in decoded

@@ -88,7 +88,33 @@ jobs:
         restore-keys: |
           device-fp-${{ runner.os }}-
 
+    - name: 判断是否需要代理
+      id: needs-proxy
+      env:
+        ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
+        PROVIDERS: ${{ secrets.PROVIDERS }}
+      run: |
+        python - <<'EOF'
+        import json, os
+        accounts = json.loads(os.getenv('ANYROUTER_ACCOUNTS') or '[]')
+        providers = json.loads(os.getenv('PROVIDERS') or '{}')
+        # 内置默认 use_proxy=true 的提供商（PROVIDERS 可覆盖 use_proxy）
+        default_use_proxy = {'agentrouter'}
+        needs = False
+        for acc in accounts:
+            p = acc.get('provider', 'anyrouter')
+            pconf = providers.get(p, {})
+            if pconf.get('use_proxy', p in default_use_proxy):
+                needs = True
+                break
+        value = 'true' if needs else 'false'
+        print(f"NEEDS_PROXY={value}")
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f"NEEDS_PROXY={value}\n")
+        EOF
+
     - name: 配置代理
+      if: steps.needs-proxy.outputs.NEEDS_PROXY == 'true'
       env:
         PROXY_SUBSCRIPTION_URL: ${{ secrets.PROXY_SUBSCRIPTION_URL }}
         PROXY_TEST_URL: https://www.google.com/generate_204
@@ -138,7 +164,7 @@ jobs:
         retention-days: 14
 
     - name: 停止代理
-      if: always()
+      if: always() && steps.needs-proxy.outputs.NEEDS_PROXY == 'true'
       run: bash scripts/stop_mihomo_proxy.sh
 
     - name: 执行结果

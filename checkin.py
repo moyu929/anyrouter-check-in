@@ -11,6 +11,8 @@ import re
 import sys
 from datetime import datetime
 
+import httpx
+
 if hasattr(sys.stdout, 'reconfigure'):
 	sys.stdout.reconfigure(line_buffering=True)
 if hasattr(sys.stderr, 'reconfigure'):
@@ -42,9 +44,31 @@ from utils.debug import is_debug_enabled, log
 from utils.gptgod import gptgod_checkin
 from utils.http_client import API_HEADERS, QUOTA_PER_DOLLAR, create_client, request_with_retry
 from utils.notify import notify
-from utils.proxy import get_playwright_proxy, is_proxy_configured
+from utils.proxy import get_playwright_proxy, is_proxy_configured, needs_proxy
+from utils.proxy_selector import NodeSelector, available, current_proxy_node, no_available_node
 
 BALANCE_HASH_FILE = 'balance_hash.txt'
+
+# 网络层异常（代理节点问题），用于触发"切换节点重试"
+_NETWORK_ERRORS = (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError)
+# 阿里云 WAF 拦截页特征字符串
+_WAF_BLOCK_MARKER = 'aliyun_waf_aa'
+
+
+class ProxyNodeIssue(Exception):
+	"""代理节点问题：目标站点经代理访问被 WAF 拦截 / 5xx / 网络异常 / 超时。
+
+	由外层 check_in_account_with_retry 捕获，切换代理节点后重试。
+	"""
+
+
+def _is_node_issue_exception(e: Exception) -> bool:
+	"""判断异常是否属于代理节点问题（网络异常，或 5xx 重试耗尽后的 RuntimeError）。"""
+	if isinstance(e, _NETWORK_ERRORS):
+		return True
+	if isinstance(e, RuntimeError) and '已重试' in str(e):
+		return True
+	return False
 
 
 def load_balance_hash():
@@ -241,19 +265,26 @@ async def login_with_github_oauth(
 	account_name: str,
 	provider_config,
 	github_session: str,
+	*,
+	force_direct: bool = False,
 ) -> BrowserLoginResult | None:
-	"""使用 GitHub OAuth 重放登录，返回 cookies 与 api_user。"""
+	"""使用 GitHub OAuth 重放登录，返回 cookies 与 api_user。
+
+	参数:
+	  force_direct: 强制直连（忽略代理）。用于节点耗尽后的兜底重试。
+	"""
 	log.info(f'{account_name}: 正在使用 GitHub OAuth 登录...')
 
 	domain = provider_config.domain
+	use_proxy = provider_config.use_proxy and not force_direct
 	client = create_client(
 		headers={
 			'Referer': domain,
 			'Origin': domain,
 		},
-		use_proxy=provider_config.use_proxy,
+		use_proxy=use_proxy,
 	)
-	if provider_config.use_proxy and not is_proxy_configured():
+	if use_proxy and not is_proxy_configured():
 		log.warn(f'{account_name}: 提供商需要代理但未配置 CHECKIN_PROXY_URL')
 
 	github_client_id = provider_config.oauth_client_id
@@ -265,6 +296,8 @@ async def login_with_github_oauth(
 		try:
 			resp = request_with_retry(client, 'GET', state_url, timeout=30)
 		except Exception as e:
+			if _is_node_issue_exception(e):
+				raise ProxyNodeIssue(f'OAuth 状态请求异常（可能节点问题）: {e}') from e
 			log.failed(f'{account_name}: OAuth 状态请求失败: {e}')
 			return None
 
@@ -273,9 +306,8 @@ async def login_with_github_oauth(
 			return None
 
 		# WAF 拦截检测（与原始项目一致）
-		if 'aliyun_waf_aa' in resp.text:
-			log.failed(f'{account_name}: 被阿里云 WAF 拦截，请尝试使用代理')
-			return None
+		if _WAF_BLOCK_MARKER in resp.text:
+			raise ProxyNodeIssue(f'{account_name}: 被阿里云 WAF 拦截，请尝试使用代理')
 
 		try:
 			state_data = resp.json()
@@ -309,6 +341,8 @@ async def login_with_github_oauth(
 				timeout=30,
 			)
 		except Exception as e:
+			if _is_node_issue_exception(e):
+				raise ProxyNodeIssue(f'GitHub OAuth 授权请求异常（可能节点问题）: {e}') from e
 			log.failed(f'{account_name}: GitHub OAuth 授权失败: {e}')
 			return None
 
@@ -335,6 +369,8 @@ async def login_with_github_oauth(
 		try:
 			cb_resp = request_with_retry(client, 'GET', callback_url, timeout=30)
 		except Exception as e:
+			if _is_node_issue_exception(e):
+				raise ProxyNodeIssue(f'OAuth 回调请求异常（可能节点问题）: {e}') from e
 			log.failed(f'{account_name}: OAuth 回调失败: {e}')
 			return None
 
@@ -343,9 +379,8 @@ async def login_with_github_oauth(
 			return None
 
 		# WAF 拦截检测（与原始项目一致）
-		if 'aliyun_waf_aa' in cb_resp.text:
-			log.failed(f'{account_name}: OAuth 回调被阿里云 WAF 拦截')
-			return None
+		if _WAF_BLOCK_MARKER in cb_resp.text:
+			raise ProxyNodeIssue(f'{account_name}: OAuth 回调被阿里云 WAF 拦截')
 
 		try:
 			cb_data = cb_resp.json()
@@ -495,8 +530,18 @@ def format_check_in_notification(detail: dict) -> str:
 	return '\n'.join(lines)
 
 
-async def check_in_account(account: AccountConfig, account_index: int, app_config: AppConfig):
-	"""为单个账号执行签到操作"""
+async def check_in_account(
+	account: AccountConfig,
+	account_index: int,
+	app_config: AppConfig,
+	*,
+	force_direct: bool = False,
+):
+	"""为单个账号执行签到操作
+
+	参数:
+	  force_direct: 强制直连（忽略代理）。用于节点耗尽后的兜底重试。
+	"""
 	account_name = account.get_display_name(account_index)
 	log.info(f'\n{account_name}: 开始处理')
 
@@ -518,7 +563,7 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 			account_name,
 			account.email,
 			account.password,
-			use_proxy=provider_config.use_proxy,
+			use_proxy=provider_config.use_proxy and not force_direct,
 		)
 		return success, info_before, info_after
 
@@ -533,6 +578,7 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 			account_name,
 			provider_config,
 			account.github_session,
+			force_direct=force_direct,
 		)
 		if login_result:
 			all_cookies = login_result.cookies
@@ -577,7 +623,7 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		account_name,
 		provider_config,
 		api_user_override=resolved_api_user,
-		use_proxy=provider_config.use_proxy,
+		use_proxy=provider_config.use_proxy and not force_direct,
 	)
 
 
@@ -639,9 +685,62 @@ def run_check_in_requests(
 			log.failed(f'{account_name}: 自动签到失败 - {error}')
 			return False, user_info_before, user_info_after
 
+	except _NETWORK_ERRORS as e:
+		# 网络/超时/连接异常 → 可能为代理节点问题，交由外层切换节点重试
+		raise ProxyNodeIssue(f'{account_name}: 签到请求网络异常: {str(e)[:50]}') from e
 	except Exception as e:
 		log.failed(f'{account_name}: 签到过程中发生错误 - {str(e)[:50]}...')
 		return False, None, None
+
+
+async def check_in_account_with_retry(
+	account: AccountConfig,
+	account_index: int,
+	app_config: AppConfig,
+	node_selector: NodeSelector | None,
+):
+	"""带代理节点切换重试的签到。
+
+	仅对 use_proxy=true 的代办商生效；非代理代办商直接走 check_in_account。
+	遇 ProxyNodeIssue（WAF 拦截 / 5xx / 网络异常 / 超时）时切换代理节点重试，
+	最多 PROXY_RETRY_TIMES 次（默认 3）。若节点选择器已无可用节点，则直连兜底一次。
+	"""
+	provider_config = app_config.get_provider(account.provider)
+	uses_proxy = bool(provider_config and provider_config.use_proxy)
+	if not uses_proxy or node_selector is None:
+		return await check_in_account(account, account_index, app_config)
+
+	account_name = account.get_display_name(account_index)
+	max_retries = int(os.getenv('PROXY_RETRY_TIMES', '3').strip() or 3)
+	proxy_url = os.getenv('CHECKIN_PROXY_URL', '').strip()
+
+	# 已知无可用代理节点：直接直连，避免先用默认节点白试一次代理
+	if no_available_node():
+		log.warn(f'{account_name}: 无可用代理节点，直接尝试直连')
+		return await check_in_account(account, account_index, app_config, force_direct=True)
+
+	attempt = 0
+
+	while True:
+		try:
+			return await check_in_account(account, account_index, app_config)
+		except ProxyNodeIssue as e:
+			attempt += 1
+			if attempt > max_retries:
+				log.warn(f'{account_name}: 节点重试已达上限（{max_retries} 次），放弃该账号')
+				return False, None, None
+
+			current = current_proxy_node()
+			if current:
+				node_selector.exclude_node(current)
+			log.warn(f'{account_name}: 检测到节点问题，切换代理节点重试（{attempt}/{max_retries}）: {str(e)[:60]}')
+
+			new_node = node_selector.select_node(proxy_url)
+			if new_node is None:
+				log.warn(f'{account_name}: 无可用代理节点，尝试直连一次')
+				return await check_in_account(account, account_index, app_config, force_direct=True)
+
+			log.info(f'{account_name}: 已切换节点 {new_node}，重试签到')
 
 
 async def main():
@@ -673,6 +772,22 @@ async def main():
 
 	log.info(f'发现 {len(accounts)} 个账号配置')
 
+	# 初始化代理节点选择器；仅当存在 use_proxy=true 的账号需要代理时才选初始节点
+	node_selector = NodeSelector() if available() else None
+	if needs_proxy(app_config, accounts):
+		if node_selector is None:
+			log.warn('存在使用代理的账号，但未检测到 mihomo controller；相关账号将尝试直连')
+		else:
+			proxy_url = os.getenv('CHECKIN_PROXY_URL', '').strip()
+			if proxy_url:
+				initial_node = node_selector.select_node(proxy_url)
+				if initial_node is None:
+					log.warn('无可用的代理节点，使用代理的账号将尝试直连')
+			else:
+				log.warn('存在使用代理的账号，但未设置 CHECKIN_PROXY_URL')
+	else:
+		log.info('所有账号均不使用代理，跳过代理节点选择')
+
 	last_balance_hash = load_balance_hash()
 
 	success_count = 0
@@ -687,7 +802,9 @@ async def main():
 	for i, account in enumerate(accounts):
 		account_key = f'account_{i + 1}'
 		try:
-			success, user_info_before, user_info_after = await check_in_account(account, i, app_config)
+			success, user_info_before, user_info_after = await check_in_account_with_retry(
+				account, i, app_config, node_selector
+			)
 			if success:
 				success_count += 1
 

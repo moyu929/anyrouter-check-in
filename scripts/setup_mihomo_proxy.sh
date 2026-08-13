@@ -15,9 +15,14 @@ fi
 
 PROXY_DIR="${RUNNER_TEMP:-/tmp}/checkin-proxy"
 PROXY_PORT="${PROXY_PORT:-7890}"
+CONTROLLER_PORT="${MIHOMO_CONTROLLER_PORT:-9090}"
 PROXY_TEST_URL="${PROXY_TEST_URL:-https://www.google.com/generate_204}"
 MIHOMO_VERSION="${MIHOMO_VERSION:-v1.19.0}"
 PROXY_REQUIRED="${PROXY_REQUIRED:-false}"
+
+# 生成 controller 访问密钥（仅 Python 节点选择器读取，绝不打印）
+PROXY_SECRET="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+export PROXY_SECRET
 
 mkdir -p "${PROXY_DIR}"
 cd "${PROXY_DIR}"
@@ -44,6 +49,10 @@ mode: rule
 log-level: warning
 unified-delay: true
 
+# 开启 REST API，供 Python 节点选择器控制节点切换
+external-controller: 127.0.0.1:${CONTROLLER_PORT}
+secret: "${PROXY_SECRET}"
+
 proxy-providers:
   subscription:
     type: http
@@ -55,45 +64,29 @@ proxy-providers:
       interval: 300
       url: https://www.gstatic.com/generate_204
 
-# 按区域分组，自动选择该区域延迟最低的节点
+# 按区域分组，节点由 Python 节点选择器手动选择（selector），不再自动测速切换
 proxy-groups:
   - name: 🇯🇵 日本
-    type: url-test
-    url: "${PROXY_TEST_URL}"
-    interval: 300
-    tolerance: 100
-    lazy: false
+    type: selector
     use:
       - subscription
     filter: "日本|JP|Japan|东京|Tokyo|大阪|Osaka"
 
   - name: 🇸🇬 新加坡
-    type: url-test
-    url: "${PROXY_TEST_URL}"
-    interval: 300
-    tolerance: 100
-    lazy: false
+    type: selector
     use:
       - subscription
     filter: "新加坡|SG|Singapore"
 
   - name: 🇭🇰 香港
-    type: url-test
-    url: "${PROXY_TEST_URL}"
-    interval: 300
-    tolerance: 100
-    lazy: false
+    type: selector
     use:
       - subscription
     filter: "香港|HK|Hong Kong|HongKong|HGC"
 
-# 回退链：日本 → 新加坡 → 香港
-# fallback 自动跳过不可用的组，选择第一个可用的
+# 回退链：日本 → 新加坡 → 香港（由 Python 节点选择器按顺序选择）
   - name: AUTO
-    type: fallback
-    url: "${PROXY_TEST_URL}"
-    interval: 300
-    lazy: false
+    type: selector
     proxies:
       - 🇯🇵 日本
       - 🇸🇬 新加坡
@@ -104,6 +97,10 @@ rules:
   - DOMAIN-KEYWORD,mjurl.com,DIRECT
   - MATCH,AUTO
 EOF
+
+echo "[INFO] Saving controller secret to ${PROXY_DIR}/proxy-secret"
+umask 077  # 防止 secret 文件被同机其他进程读取
+echo "${PROXY_SECRET}" > "${PROXY_DIR}/proxy-secret"
 
 echo "[INFO] Starting mihomo on 127.0.0.1:${PROXY_PORT}..."
 nohup "${MIHOMO_BIN}" -d "${PROXY_DIR}" -f config.yaml > mihomo.log 2>&1 &
@@ -136,4 +133,6 @@ echo "[SUCCESS] Proxy is ready: ${PROXY_URL}"
 echo "[INFO] Proxy is scoped to CHECKIN_PROXY_URL (browser/python only, not global HTTP_PROXY)"
 if [[ -n "${GITHUB_ENV:-}" ]]; then
 	echo "CHECKIN_PROXY_URL=${PROXY_URL}" >> "${GITHUB_ENV}"
+	echo "MIHOMO_CONTROLLER=http://127.0.0.1:${CONTROLLER_PORT}" >> "${GITHUB_ENV}"
+	echo "MIHOMO_SECRET_FILE=${PROXY_DIR}/proxy-secret" >> "${GITHUB_ENV}"
 fi

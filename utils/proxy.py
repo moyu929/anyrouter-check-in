@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 
 from utils.debug import log
+from utils.proxy_selector import current_proxy_node
 
 # 代理连通性测试缓存（进程级，避免每次请求都测试）
 _proxy_working: bool | None = None
@@ -66,7 +67,9 @@ def get_proxy_server(*, use_proxy: bool = True) -> str | None:
 	if _proxy_working is None:
 		_proxy_working = _test_proxy(server)
 		if _proxy_working:
-			log.info(f'代理连通性正常: {server}')
+			node = current_proxy_node()
+			node_info = f'（节点 {node}）' if node else ''
+			log.info(f'代理连通性正常: {server}{node_info}')
 		else:
 			log.warn(f'代理 {server} 不可达（测试地址: {get_proxy_test_url()}），回退到直连')
 
@@ -84,3 +87,15 @@ def reset_proxy_cache() -> None:
 	"""重置代理连通性缓存（测试用）。"""
 	global _proxy_working
 	_proxy_working = None
+
+
+def needs_proxy(app_config, accounts) -> bool:
+	"""判断是否存在 use_proxy=true 的提供商（任一账号需要走代理）。
+
+	用于决定是否值得初始化代理 / 执行节点选择，避免无用初始化。
+	"""
+	for account in accounts:
+		provider = app_config.get_provider(account.provider)
+		if provider is not None and provider.use_proxy:
+			return True
+	return False

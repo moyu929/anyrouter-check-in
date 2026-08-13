@@ -11,11 +11,13 @@
 import os
 import random
 import time
+import urllib.parse
 
 import httpx
 
-from utils.debug import is_debug_enabled, log
+from utils.debug import log
 from utils.proxy import get_proxy_server
+from utils.proxy_selector import current_proxy_node
 
 # 所有签到分支统一的 UA（Windows Chrome）
 DEFAULT_UA = (
@@ -46,6 +48,22 @@ QUOTA_PER_DOLLAR = 500000
 DEFAULT_RETRY_TIMES = 3
 _RETRYABLE_STATUS = (429, 500, 502, 503, 504)
 _RETRYABLE_EXCEPTIONS = (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError)
+
+# 可能携带敏感凭据的查询参数，日志脱敏时隐藏其值
+_SENSITIVE_QUERY_PARAMS = {'code', 'state', 'token', 'access_token', 'user_session', '_k'}
+
+
+def _redact_url(url: str) -> str:
+	"""对 URL 中的敏感查询参数值打码，防止 OAuth code / token 等进入日志。"""
+	try:
+		parts = urllib.parse.urlsplit(url)
+		if not parts.query:
+			return url
+		params = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+		redacted = [(k, '<redacted>') if k.lower() in _SENSITIVE_QUERY_PARAMS else (k, v) for k, v in params]
+		return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(redacted)))
+	except Exception:
+		return url
 
 
 def get_retry_times() -> int:
@@ -96,19 +114,19 @@ def request_with_retry(
 			if attempt >= retries:
 				break
 			wait = (2**attempt) + random.uniform(0, 1)  # nosec B311 - 仅用于重试退避抖动，非安全用途
-			log.debug(f'请求 {url} 返回 {response.status_code}，{wait:.1f}s 后重试（第 {attempt + 1}/{retries} 次）')
+			log.debug(f'请求 {_redact_url(url)} 返回 {response.status_code}，{wait:.1f}s 后重试（第 {attempt + 1}/{retries} 次）')
 			time.sleep(wait)
 		except _RETRYABLE_EXCEPTIONS as e:
 			last_error = e
 			if attempt >= retries:
 				break
 			wait = (2**attempt) + random.uniform(0, 1)  # nosec B311 - 仅用于重试退避抖动，非安全用途
-			log.debug(f'请求 {url} 异常: {e}，{wait:.1f}s 后重试（第 {attempt + 1}/{retries} 次）')
+			log.debug(f'请求 {_redact_url(url)} 异常: {e}，{wait:.1f}s 后重试（第 {attempt + 1}/{retries} 次）')
 			time.sleep(wait)
 
 	if isinstance(last_error, Exception):
 		raise last_error
-	raise RuntimeError(f'请求 {url} 返回 {last_error}（已重试 {retries} 次）')
+	raise RuntimeError(f'请求 {_redact_url(url)} 返回 {last_error}（已重试 {retries} 次）')
 
 
 def create_client(
@@ -131,8 +149,9 @@ def create_client(
 	proxy_url = get_proxy_server(use_proxy=use_proxy)
 	if proxy_url:
 		kwargs['proxy'] = proxy_url
-		if is_debug_enabled():
-			log.debug(f'HTTP 客户端代理已启用: {proxy_url}')
+		node = current_proxy_node()
+		node_info = f'（节点 {node}）' if node else ''
+		log.info(f'HTTP 客户端代理已启用: {proxy_url}{node_info}')
 	client = httpx.Client(**kwargs)
 	base_headers = dict(API_HEADERS)
 	if headers:

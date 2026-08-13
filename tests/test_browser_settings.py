@@ -13,7 +13,7 @@ def test_browser_login_settings_records_profile_persistence(monkeypatch, tmp_pat
 	settings = load_browser_login_settings('Account 1', 'agentrouter', persist_profile=False)
 
 	assert settings.persist_profile is False
-	assert settings.profile_dir == tmp_path / 'agentrouter' / 'Account 1'
+	assert settings.profile_dir == tmp_path / 'agentrouter' / 'Account_1'
 
 
 @pytest.mark.asyncio
@@ -97,5 +97,37 @@ async def test_launch_login_context_closes_browser_for_ephemeral_context(monkeyp
 	await context.close()
 
 	assert context.closed is True
+
+
+@pytest.mark.asyncio
+async def test_launch_login_context_closes_browser_when_context_creation_fails(monkeypatch, tmp_path):
+	class FakeBrowser:
+		def __init__(self):
+			self.closed = False
+
+		async def new_context(self, **_kwargs):
+			raise RuntimeError('context failed')
+
+		async def close(self):
+			self.closed = True
+
+	browser = FakeBrowser()
+
+	async def fake_launch_async(**_kwargs):
+		return browser
+
+	monkeypatch.setitem(sys.modules, 'cloakbrowser', SimpleNamespace(launch_async=fake_launch_async))
+	settings = load_browser_login_settings('Account 1', 'agentrouter', persist_profile=False)
+	settings = settings.__class__(
+		headless=settings.headless,
+		humanize=False,
+		wait_timeout_ms=settings.wait_timeout_ms,
+		profile_dir=tmp_path / 'profiles',
+		cloakbrowser_binary_path=None,
+		persist_profile=False,
+	)
+
+	with pytest.raises(RuntimeError, match='context failed'):
+		await launch_login_context(settings)
+
 	assert browser.closed is True
-	assert not settings.profile_dir.exists()

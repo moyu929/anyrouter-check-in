@@ -27,35 +27,35 @@ class _Log:
 
 	@staticmethod
 	def info(msg: str) -> None:
-		print(f'[INFO] {msg}')
+		print(f'[信息] {msg}')
 
 	@staticmethod
 	def success(msg: str) -> None:
-		print(f'[SUCCESS] {msg}')
+		print(f'[成功] {msg}')
 
 	@staticmethod
 	def warn(msg: str) -> None:
-		print(f'[WARN] {msg}')
+		print(f'[警告] {msg}')
 
 	@staticmethod
 	def failed(msg: str) -> None:
-		print(f'[FAILED] {msg}')
+		print(f'[失败] {msg}')
 
 	@staticmethod
 	def debug(msg: str) -> None:
 		"""仅在调试模式下输出。"""
 		if _is_debug():
-			print(f'[DEBUG] {msg}')
+			print(f'[调试] {msg}')
 
 	@staticmethod
 	def notify(msg: str) -> None:
 		"""通知相关日志（始终输出）。"""
-		print(f'[NOTIFY] {msg}')
+		print(f'[通知] {msg}')
 
 	@staticmethod
 	def stats(msg: str) -> None:
 		"""统计汇总日志（始终输出）。"""
-		print(f'[STATS] {msg}')
+		print(f'[统计] {msg}')
 
 
 log = _Log()

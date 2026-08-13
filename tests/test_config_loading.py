@@ -154,6 +154,11 @@ class TestLoadAccountsConfig:
 		assert accounts is not None
 		assert accounts[0].has_oauth_credentials() is True
 
+	def test_empty_github_session_is_rejected(self, monkeypatch):
+		monkeypatch.setenv('ANYROUTER_ACCOUNTS', json.dumps([{'github_session': ''}]))
+
+		assert load_accounts_config() is None
+
 	def test_api_user_without_any_credential_is_rejected(self, monkeypatch):
 		monkeypatch.setenv('ANYROUTER_ACCOUNTS', json.dumps([{'api_user': '42'}]))
 

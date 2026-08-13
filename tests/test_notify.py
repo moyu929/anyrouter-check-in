@@ -1,6 +1,4 @@
-import os
 import sys
-from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -44,16 +42,6 @@ def mock_httpx_client():
 		yield mock_client, mock_response
 
 
-def test_real_notification(notification_kit):
-	"""真实接口测试，需要配置.env.local文件"""
-	if os.getenv('ENABLE_REAL_TEST') != 'true':
-		pytest.skip('未启用真实接口测试')
-
-	notification_kit.push_message(
-		'测试消息', f'这是一条测试消息\n发送时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
-	)
-
-
 @patch('smtplib.SMTP_SSL')
 def test_send_email(mock_smtp, notification_kit):
 	mock_server = MagicMock()
@@ -71,7 +59,7 @@ def test_send_pushplus(mock_httpx_client, notification_kit):
 	notification_kit.send_pushplus('测试标题', '测试内容')
 
 	mock_client.post.assert_called_once_with(
-		'http://www.pushplus.plus/send',
+		'https://www.pushplus.plus/send',
 		json={'token': 'pushplus_token', 'title': '测试标题', 'content': '测试内容', 'template': 'html'},
 	)
 

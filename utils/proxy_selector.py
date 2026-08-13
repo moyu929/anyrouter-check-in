@@ -102,7 +102,7 @@ class NodeSelector:
 	def __init__(self):
 		self.base = _controller_base()
 		self.secret = _load_secret()
-		self._client = httpx.Client(timeout=10.0)
+		self._client = httpx.Client(timeout=10.0, trust_env=False)
 
 	def _headers(self) -> dict:
 		h = {'Accept': 'application/json'}
@@ -118,12 +118,12 @@ class NodeSelector:
 	def _get(self, path: str) -> dict:
 		r = self._client.get(f'{self.base}{path}', headers=self._headers())
 		r.raise_for_status()
-		return r.json()
+		return dict(r.json())
 
 	def _put(self, path: str, body: dict) -> dict:
 		r = self._client.put(f'{self.base}{path}', json=body, headers=self._headers())
 		r.raise_for_status()
-		return r.json()
+		return dict(r.json())
 
 	def group_nodes(self, group: str) -> list[str]:
 		"""返回 selector 组内可选择节点列表（含子组名）。"""
@@ -144,9 +144,7 @@ class NodeSelector:
 		"""测试节点延迟（毫秒），失败/超时返回 None。"""
 		try:
 			url = self._quote(DEFAULT_TEST_URL)
-			data = self._get(
-				f'/proxies/{self._quote(node)}/delay?url={url}&timeout={_NODE_DELAY_TIMEOUT_MS}'
-			)
+			data = self._get(f'/proxies/{self._quote(node)}/delay?url={url}&timeout={_NODE_DELAY_TIMEOUT_MS}')
 			delay = data.get('delay')
 			return int(delay) if isinstance(delay, (int, float)) else None
 		except Exception:
@@ -159,7 +157,7 @@ class NodeSelector:
 	def verify_connectivity(self, proxy_url: str) -> bool:
 		"""通过本地代理测试出网连通性（轻量，只证可达）。"""
 		try:
-			with httpx.Client(proxy=proxy_url, timeout=_VERIFY_TIMEOUT) as c:
+			with httpx.Client(proxy=proxy_url, timeout=_VERIFY_TIMEOUT, trust_env=False) as c:
 				r = c.get(DEFAULT_TEST_URL)
 				return r.status_code in (200, 204)
 		except Exception:
@@ -206,12 +204,12 @@ class NodeSelector:
 				log.warn(f'节点选择: 区域 {region} 所有节点测速超时/失败')
 				continue
 
-			ordered = sorted(delays, key=delays.get)
+			ordered = sorted(delays, key=lambda node: delays[node])
 			for node in ordered:
 				log.info(f'节点选择: 候选 {region} -> {node}（延迟 {delays[node]}ms）')
 				try:
-					self.select(region, node)          # 区域 selector 切到该节点
-					self.select(AUTO_GROUP, region)    # AUTO 切到该区域
+					self.select(region, node)  # 区域 selector 切到该节点
+					self.select(AUTO_GROUP, region)  # AUTO 切到该区域
 				except Exception as e:
 					log.warn(f'节点选择: 切换到 {node} 失败: {str(e)[:80]}，排除')
 					_mark_excluded(node)
@@ -237,6 +235,4 @@ class NodeSelector:
 def dump_selector_state() -> str:
 	"""调试用：输出选择器状态。"""
 	with _lock:
-		return json.dumps(
-			{'current_node': _current_node, 'excluded_count': len(_excluded_nodes)}, ensure_ascii=False
-		)
+		return json.dumps({'current_node': _current_node, 'excluded_count': len(_excluded_nodes)}, ensure_ascii=False)

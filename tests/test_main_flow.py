@@ -100,7 +100,7 @@ class TestMainNotification:
 		assert '首次' not in spy.body  # 日志用语不进通知正文
 		assert '[CHECK-IN] 主号' in spy.body
 		assert '签到获得: +$25.00' in spy.body
-		assert 'Success: 1/1' in spy.body
+		assert '成功: 1/1' in spy.body
 
 	async def test_second_run_without_change_skips_notification(self, harness):
 		accounts = [_account('主号')]
@@ -125,8 +125,8 @@ class TestMainNotification:
 			await main()
 
 		assert exc.value.code == 1
-		assert '[FAIL] 主号' in spy.body
-		assert 'Failed: 1/1' in spy.body
+		assert '[失败] 主号' in spy.body
+		assert '失败: 1/1' in spy.body
 
 	async def test_similar_account_names_are_not_deduplicated(self, harness):
 		"""account_1 不应被 account_11 的条目吞掉 —— 精确 key 判重回归测试。"""
@@ -175,7 +175,7 @@ class TestMainNotification:
 			await main()
 
 		assert exc.value.code == 1
-		assert 'exception' in spy.body
+		assert '异常' in spy.body
 
 	async def test_missing_accounts_config_exits_with_error(self, monkeypatch, tmp_path):
 		monkeypatch.setattr(checkin_module, 'BALANCE_HASH_FILE', str(tmp_path / 'h.txt'))
@@ -199,5 +199,157 @@ class TestMainNotification:
 			await main()
 
 		assert exc.value.code == 0
-		assert 'Success: 1/2' in spy.body
-		assert 'Some accounts check-in successful' in spy.body
+		assert '成功: 1/2' in spy.body
+		assert '部分账号签到成功' in spy.body
+
+
+class _FakeSelector:
+	"""记录 select_node 调用的节点选择器替身。"""
+
+	def __init__(self, node_result: str | None = 'node-jp'):
+		self.node_result = node_result
+		self.select_calls = 0
+		self.last_url: str | None = None
+
+	def select_node(self, proxy_url: str):
+		self.select_calls += 1
+		self.last_url = proxy_url
+		return self.node_result
+
+
+class TestMainProxyInit:
+	"""main() 代理节点选择器初始化矩阵（全部 mock，不启动真实 controller）。"""
+
+	@staticmethod
+	def _base(monkeypatch, tmp_path, *, node_result: str | None = 'node-jp'):
+		monkeypatch.setattr(checkin_module, 'BALANCE_HASH_FILE', str(tmp_path / 'bh.txt'))
+		monkeypatch.setattr(checkin_module, 'load_accounts_config', lambda: [_account('主号')])
+		fake_selector = _FakeSelector(node_result=node_result)
+		monkeypatch.setattr(checkin_module, 'NodeSelector', lambda: fake_selector)
+		invoked = {}
+
+		async def fake_retry(account, index, app_config, node_selector):
+			invoked['node_selector'] = node_selector
+			return True, None, None
+
+		monkeypatch.setattr(checkin_module, 'check_in_account_with_retry', fake_retry)
+		spy = _NotifySpy()
+		monkeypatch.setattr(checkin_module.notify, 'push_message', spy.push_message)
+		return fake_selector, invoked, spy
+
+	@staticmethod
+	async def _run():
+		with pytest.raises(SystemExit) as exc:
+			await main()
+		return exc.value.code
+
+	async def test_proxy_initialized_and_selector_success(self, monkeypatch, tmp_path):
+		fake_selector, invoked, _ = self._base(monkeypatch, tmp_path)
+		monkeypatch.setattr(checkin_module, 'available', lambda: True)
+		monkeypatch.setattr(checkin_module, 'needs_proxy', lambda app, acc: True)
+		monkeypatch.setenv('CHECKIN_PROXY_URL', 'http://127.0.0.1:7890')
+
+		code = await self._run()
+
+		assert code == 0
+		assert fake_selector.select_calls == 1
+		assert fake_selector.last_url == 'http://127.0.0.1:7890'
+		assert invoked['node_selector'] is fake_selector
+
+	async def test_select_node_none_does_not_crash(self, monkeypatch, tmp_path):
+		fake_selector, invoked, _ = self._base(monkeypatch, tmp_path, node_result=None)
+		monkeypatch.setattr(checkin_module, 'available', lambda: True)
+		monkeypatch.setattr(checkin_module, 'needs_proxy', lambda app, acc: True)
+		monkeypatch.setenv('CHECKIN_PROXY_URL', 'http://127.0.0.1:7890')
+
+		code = await self._run()
+
+		assert code == 0
+		assert fake_selector.select_calls == 1
+		assert invoked['node_selector'] is fake_selector
+
+	async def test_proxy_needed_but_no_controller(self, monkeypatch, tmp_path):
+		_, invoked, _ = self._base(monkeypatch, tmp_path)
+		monkeypatch.setattr(checkin_module, 'available', lambda: False)
+		monkeypatch.setattr(checkin_module, 'needs_proxy', lambda app, acc: True)
+		monkeypatch.setenv('CHECKIN_PROXY_URL', 'http://127.0.0.1:7890')
+
+		code = await self._run()
+
+		assert code == 0
+		# 无 controller 时 NodeSelector 不创建，node_selector 为 None
+		assert invoked['node_selector'] is None
+
+	async def test_proxy_needed_no_proxy_url(self, monkeypatch, tmp_path):
+		fake_selector, invoked, _ = self._base(monkeypatch, tmp_path)
+		monkeypatch.setattr(checkin_module, 'available', lambda: True)
+		monkeypatch.setattr(checkin_module, 'needs_proxy', lambda app, acc: True)
+		monkeypatch.delenv('CHECKIN_PROXY_URL', raising=False)
+
+		code = await self._run()
+
+		assert code == 0
+		# 未设置 CHECKIN_PROXY_URL 时不做初始节点选择
+		assert fake_selector.select_calls == 0
+		assert invoked['node_selector'] is not None
+
+	async def test_no_proxy_skips_initial_selection(self, monkeypatch, tmp_path):
+		fake_selector, invoked, _ = self._base(monkeypatch, tmp_path)
+		monkeypatch.setattr(checkin_module, 'available', lambda: True)
+		monkeypatch.setattr(checkin_module, 'needs_proxy', lambda app, acc: False)
+		monkeypatch.setenv('CHECKIN_PROXY_URL', 'http://127.0.0.1:7890')
+
+		code = await self._run()
+
+		assert code == 0
+		# 所有账号不使用代理时跳过初始节点选择
+		assert fake_selector.select_calls == 0
+
+
+class TestMainProxyInitScreenshots:
+	"""debug 模式下截图提示的两种分支（GITHUB artifact URL / 本地目录）。"""
+
+	@staticmethod
+	def _setup(monkeypatch, tmp_path):
+		monkeypatch.setattr(checkin_module, 'BALANCE_HASH_FILE', str(tmp_path / 'bh.txt'))
+		monkeypatch.setattr(checkin_module, 'load_accounts_config', lambda: [_account('主号')])
+
+		async def fake_retry(account, index, app_config, node_selector):
+			return False, None, None  # 失败 → 触发通知，确保正文包含统计与截图提示
+
+		monkeypatch.setattr(checkin_module, 'check_in_account_with_retry', fake_retry)
+		monkeypatch.setattr(checkin_module, 'available', lambda: False)
+		monkeypatch.setattr(checkin_module, 'needs_proxy', lambda app, acc: False)
+		monkeypatch.setattr(checkin_module, 'take_pending_screenshots', lambda: [Path('/tmp/shot.png')])
+		monkeypatch.setattr(checkin_module, 'is_debug_enabled', lambda: True)
+		spy = _NotifySpy()
+		monkeypatch.setattr(checkin_module.notify, 'push_message', spy.push_message)
+		return spy
+
+	@staticmethod
+	async def _run():
+		with pytest.raises(SystemExit) as exc:
+			await main()
+		return exc.value.code
+
+	async def test_actions_artifact_url_branch(self, monkeypatch, tmp_path):
+		spy = self._setup(monkeypatch, tmp_path)
+		monkeypatch.setenv('GITHUB_RUN_ID', '12345')
+		monkeypatch.setenv('GITHUB_REPOSITORY', 'user/repo')
+
+		code = await self._run()
+
+		assert code == 1
+		assert '[截图] 已保存 1 张调试截图' in spy.body
+		assert 'checkin-screenshots-12345' in spy.body
+		assert 'user/repo/actions/runs/12345' in spy.body
+
+	async def test_local_dir_branch_without_github_env(self, monkeypatch, tmp_path):
+		spy = self._setup(monkeypatch, tmp_path)
+		monkeypatch.delenv('GITHUB_RUN_ID', raising=False)
+		monkeypatch.delenv('GITHUB_REPOSITORY', raising=False)
+
+		code = await self._run()
+
+		assert code == 1
+		assert '保存到 `checkin_screenshots/` 目录' in spy.body

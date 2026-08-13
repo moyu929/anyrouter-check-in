@@ -105,7 +105,7 @@ class TestLoadBrowserLoginSettings:
 		assert settings.headless is True
 		assert settings.humanize is True
 		assert settings.persist_profile is True
-		assert settings.profile_dir == Path('.browser_profiles') / 'anyrouter' / 'Account 1'
+		assert settings.profile_dir == Path('.browser_profiles') / 'anyrouter' / 'Account_1'
 		assert settings.cloakbrowser_binary_path is None
 
 	def test_agentrouter_humanize_override(self, monkeypatch):
@@ -130,8 +130,14 @@ class TestLoadBrowserLoginSettings:
 
 		assert load_browser_login_settings('A', 'anyrouter').cloakbrowser_binary_path is None
 
+	def test_profile_path_parts_are_sanitized(self, monkeypatch, tmp_path):
+		monkeypatch.setenv('CHECKIN_BROWSER_PROFILE_DIR', str(tmp_path))
 
-class TestScreenshotHelpers:
+		settings = load_browser_login_settings('../Account/1', '../provider')
+
+		assert settings.profile_dir == tmp_path / '_provider' / '_Account_1'
+		assert settings.profile_dir.is_relative_to(tmp_path)
+
 	def test_screenshot_dir_from_env(self, monkeypatch, tmp_path):
 		monkeypatch.setenv('CHECKIN_SCREENSHOT_DIR', str(tmp_path / 'shots'))
 

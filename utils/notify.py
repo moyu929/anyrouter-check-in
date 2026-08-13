@@ -28,7 +28,7 @@ class NotificationKit:
 		self.bark_server = os.getenv('BARK_SERVER', 'https://api.day.app')
 
 	def _post_json(self, service: str, url: str, data: dict[str, Any]) -> httpx.Response:
-		with httpx.Client(timeout=30.0) as client:
+		with httpx.Client(timeout=30.0, trust_env=False) as client:
 			response = client.post(url, json=data)
 
 		if response.status_code >= 400:
@@ -80,7 +80,7 @@ class NotificationKit:
 			raise ValueError('PushPlus Token not configured')
 
 		data = {'token': self.pushplus_token, 'title': title, 'content': content, 'template': 'html'}
-		self._post_json('PushPlus', 'http://www.pushplus.plus/send', data)
+		self._post_json('PushPlus', 'https://www.pushplus.plus/send', data)
 
 	def send_serverPush(self, title: str, content: str):
 		if not self.server_push_key:

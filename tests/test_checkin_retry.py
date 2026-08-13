@@ -12,6 +12,7 @@ from checkin import (
 	check_in_account_with_retry,
 )
 from utils.config import AccountConfig, AppConfig, ProviderConfig
+from utils.http_client import RetryExhaustedError
 
 
 class _FakeSelector:
@@ -31,9 +32,7 @@ class _FakeSelector:
 
 
 def _app_config(*, use_proxy: bool = True) -> AppConfig:
-	return AppConfig(
-		providers={'tp': ProviderConfig(name='tp', domain='https://example.com', use_proxy=use_proxy)}
-	)
+	return AppConfig(providers={'tp': ProviderConfig(name='tp', domain='https://example.com', use_proxy=use_proxy)})
 
 
 def _account() -> AccountConfig:
@@ -65,8 +64,8 @@ class TestIsNodeIssueException:
 		assert _is_node_issue_exception(httpx.ConnectError('c')) is True
 		assert _is_node_issue_exception(httpx.NetworkError('n')) is True
 
-	def test_retry_exhausted_runtime_error_is_node_issue(self):
-		e = RuntimeError('请求 https://x 返回 HTTP 503（已重试 3 次）')
+	def test_retry_exhausted_error_is_node_issue(self):
+		e = RetryExhaustedError('HTTP 503')
 		assert _is_node_issue_exception(e) is True
 
 	def test_other_exception_not_node_issue(self):

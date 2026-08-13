@@ -29,20 +29,22 @@ class ProviderConfig:
 	oauth_callback_path: str = '/api/oauth/github'
 
 	def __post_init__(self):
-		required_waf_cookies = set()
-		if self.waf_cookie_names and isinstance(self.waf_cookie_names, List):
+		required_waf_cookies: list[str] = []
+		if self.waf_cookie_names and isinstance(self.waf_cookie_names, list):
+			seen: set[str] = set()
 			for item in self.waf_cookie_names:
 				name = '' if not item or not isinstance(item, str) else item.strip()
 				if not name:
-					print(f'[WARNING] Found invalid WAF cookie name: {item}')
+					print(f'[警告] 发现非法的 WAF cookie 名称: {item}')
 					continue
-
-				required_waf_cookies.add(name)
+				if name not in seen:
+					seen.add(name)
+					required_waf_cookies.append(name)
 
 		if not required_waf_cookies:
 			self.bypass_method = None
 
-		self.waf_cookie_names = list(required_waf_cookies)
+		self.waf_cookie_names = required_waf_cookies
 
 	@classmethod
 	def from_dict(cls, name: str, data: dict, *, defaults: 'ProviderConfig | None' = None) -> 'ProviderConfig':
@@ -150,7 +152,7 @@ class AppConfig:
 				providers_data = json.loads(providers_str)
 
 				if not isinstance(providers_data, dict):
-					print('[WARNING] PROVIDERS must be a JSON object, ignoring custom providers')
+					print('[警告] PROVIDERS 必须是 JSON 对象，已忽略自定义提供商')
 					return cls(providers=providers)
 
 				# 解析自定义 providers,会覆盖默认配置
@@ -162,16 +164,14 @@ class AppConfig:
 							defaults=providers.get(name),
 						)
 					except Exception as e:
-						print(f'[WARNING] Failed to parse provider "{name}": {e}, skipping')
+						print(f'[警告] 解析提供商 "{name}" 失败: {e}，已跳过')
 						continue
 
-				print(f'[INFO] Loaded {len(providers_data)} custom provider(s) from PROVIDERS environment variable')
+				print(f'[信息] 已从 PROVIDERS 环境变量加载 {len(providers_data)} 个自定义提供商')
 			except json.JSONDecodeError as e:
-				print(
-					f'[WARNING] Failed to parse PROVIDERS environment variable: {e}, using default configuration only'
-				)
+				print(f'[警告] PROVIDERS 环境变量解析失败: {e}，仅使用默认配置')
 			except Exception as e:
-				print(f'[WARNING] Error loading PROVIDERS: {e}, using default configuration only')
+				print(f'[警告] 加载 PROVIDERS 出错: {e}，仅使用默认配置')
 
 		return cls(providers=providers)
 
@@ -225,50 +225,48 @@ def load_accounts_config() -> list[AccountConfig] | None:
 	"""从环境变量加载账号配置"""
 	accounts_str = os.getenv('ANYROUTER_ACCOUNTS')
 	if not accounts_str:
-		print('ERROR: ANYROUTER_ACCOUNTS environment variable not found')
+		print('错误: 未找到 ANYROUTER_ACCOUNTS 环境变量')
 		return None
 
 	try:
 		accounts_data = json.loads(accounts_str)
 	except json.JSONDecodeError as e:
-		print(f'ERROR: ANYROUTER_ACCOUNTS JSON 解析失败: {e}')
-		print('HINT: 常见原因 - 末尾多余逗号、使用了单引号、包含注释、或换行格式问题')
+		print(f'错误: ANYROUTER_ACCOUNTS JSON 解析失败: {e}')
+		print('提示: 常见原因 - 末尾多余逗号、使用了单引号、包含注释、或换行格式问题')
 		return None
 
 	try:
 		if not isinstance(accounts_data, list):
-			print('ERROR: Account configuration must use array format [{}]')
+			print('错误: 账号配置必须使用数组格式 [{}]')
 			return None
 
 		accounts = []
 		for i, account_dict in enumerate(accounts_data):
 			if not isinstance(account_dict, dict):
-				print(f'ERROR: Account {i + 1} configuration format is incorrect')
+				print(f'错误: 账号 {i + 1} 配置格式不正确')
 				return None
 
-			has_oauth = account_dict.get('github_session') is not None
+			has_oauth = bool(account_dict.get('github_session'))
 			if 'api_user' not in account_dict:
 				has_login = account_dict.get('email') and account_dict.get('password')
 				if not has_login and not has_oauth:
-					print(
-						f'ERROR: Account {i + 1} missing required field (api_user) - only email+password or github_session login can omit it'
-					)
+					print(f'错误: 账号 {i + 1} 缺少必填字段 (api_user) - 仅邮箱密码或 github_session 登录可省略它')
 					return None
 
 			has_cookies = 'cookies' in account_dict and account_dict['cookies']
 			has_login = account_dict.get('email') and account_dict.get('password')
 
 			if not has_cookies and not has_login and not has_oauth:
-				print(f'ERROR: Account {i + 1} must have either cookies, email+password, or github_session')
+				print(f'错误: 账号 {i + 1} 必须配置 cookies、邮箱密码 或 github_session 之一')
 				return None
 
 			if 'name' in account_dict and not account_dict['name']:
-				print(f'ERROR: Account {i + 1} name field cannot be empty')
+				print(f'错误: 账号 {i + 1} 的 name 字段不能为空')
 				return None
 
 			accounts.append(AccountConfig.from_dict(account_dict, i))
 
 		return accounts
 	except Exception as e:
-		print(f'ERROR: Account configuration format is incorrect: {e}')
+		print(f'错误: 账号配置格式不正确: {e}')
 		return None

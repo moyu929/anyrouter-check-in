@@ -16,7 +16,7 @@ import urllib.parse
 import httpx
 
 from utils.debug import log
-from utils.proxy import get_proxy_server
+from utils.proxy import get_proxy_server, redact_proxy_url
 from utils.proxy_selector import current_proxy_node
 
 # 所有签到分支统一的 UA（Windows Chrome）
@@ -64,6 +64,10 @@ def _redact_url(url: str) -> str:
 		return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(redacted)))
 	except Exception:
 		return url
+
+
+class RetryExhaustedError(RuntimeError):
+	"""可重试 HTTP 状态持续失败。"""
 
 
 def get_retry_times() -> int:
@@ -114,7 +118,9 @@ def request_with_retry(
 			if attempt >= retries:
 				break
 			wait = (2**attempt) + random.uniform(0, 1)  # nosec B311 - 仅用于重试退避抖动，非安全用途
-			log.debug(f'请求 {_redact_url(url)} 返回 {response.status_code}，{wait:.1f}s 后重试（第 {attempt + 1}/{retries} 次）')
+			log.debug(
+				f'请求 {_redact_url(url)} 返回 {response.status_code}，{wait:.1f}s 后重试（第 {attempt + 1}/{retries} 次）'
+			)
 			time.sleep(wait)
 		except _RETRYABLE_EXCEPTIONS as e:
 			last_error = e
@@ -126,7 +132,7 @@ def request_with_retry(
 
 	if isinstance(last_error, Exception):
 		raise last_error
-	raise RuntimeError(f'请求 {_redact_url(url)} 返回 {last_error}（已重试 {retries} 次）')
+	raise RetryExhaustedError(f'请求 {_redact_url(url)} 返回 {last_error}（已重试 {retries} 次）')
 
 
 def create_client(
@@ -145,13 +151,13 @@ def create_client(
 	  use_proxy: 提供商是否需要代理。仅当为 True、CHECKIN_PROXY_URL 已设置
 	             且连通性测试通过时才走代理，否则直连。
 	"""
-	kwargs: dict = {'http2': http2, 'timeout': timeout}
+	kwargs: dict = {'http2': http2, 'timeout': timeout, 'trust_env': False}
 	proxy_url = get_proxy_server(use_proxy=use_proxy)
 	if proxy_url:
 		kwargs['proxy'] = proxy_url
 		node = current_proxy_node()
 		node_info = f'（节点 {node}）' if node else ''
-		log.info(f'HTTP 客户端代理已启用: {proxy_url}{node_info}')
+		log.info(f'HTTP 客户端代理已启用: {redact_proxy_url(proxy_url)}{node_info}')
 	client = httpx.Client(**kwargs)
 	base_headers = dict(API_HEADERS)
 	if headers:

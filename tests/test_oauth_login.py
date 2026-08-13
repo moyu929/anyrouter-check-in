@@ -123,7 +123,20 @@ class TestLoginWithGithubOauth:
 		gh_request = next(r for r in server.requests if r.url.host == 'github.com')
 		assert FAKE_GH_SESSION in gh_request.headers.get('cookie', '')
 
-	async def test_waf_block_on_state_is_detected(self, run_oauth):
+	async def test_github_response_cookies_are_not_returned_for_provider(self, run_oauth):
+		class CookieServer(_OAuthServer):
+			def __call__(self, request: httpx.Request) -> httpx.Response:
+				response = super().__call__(request)
+				if request.url.host == 'github.com':
+					response.headers['set-cookie'] = 'github_auth=secret; Domain=github.com; Path=/'
+				return response
+
+		result = await run_oauth(CookieServer())
+
+		assert result is not None
+		assert result.cookies.get('session') == 'logged-in'
+		assert 'github_auth' not in result.cookies
+
 		server = _OAuthServer(state_text='<html>aliyun_waf_aa</html>')
 
 		# WAF 拦截被视为节点问题，抛出 ProxyNodeIssue

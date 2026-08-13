@@ -10,6 +10,7 @@ import os
 import re
 import sys
 from datetime import datetime
+from urllib.parse import urlencode, urlparse
 
 import httpx
 
@@ -42,9 +43,9 @@ from utils.browser import (
 from utils.config import AccountConfig, AppConfig, load_accounts_config
 from utils.debug import is_debug_enabled, log
 from utils.gptgod import gptgod_checkin
-from utils.http_client import API_HEADERS, QUOTA_PER_DOLLAR, create_client, request_with_retry
+from utils.http_client import API_HEADERS, QUOTA_PER_DOLLAR, RetryExhaustedError, create_client, request_with_retry
 from utils.notify import notify
-from utils.proxy import get_playwright_proxy, is_proxy_configured, needs_proxy
+from utils.proxy import get_playwright_proxy, is_proxy_configured, needs_proxy, redact_proxy_url
 from utils.proxy_selector import NodeSelector, available, current_proxy_node, no_available_node
 
 BALANCE_HASH_FILE = 'balance_hash.txt'
@@ -66,7 +67,7 @@ def _is_node_issue_exception(e: Exception) -> bool:
 	"""判断异常是否属于代理节点问题（网络异常，或 5xx 重试耗尽后的 RuntimeError）。"""
 	if isinstance(e, _NETWORK_ERRORS):
 		return True
-	if isinstance(e, RuntimeError) and '已重试' in str(e):
+	if isinstance(e, RetryExhaustedError):
 		return True
 	return False
 
@@ -115,6 +116,18 @@ def parse_cookies(cookies_data):
 	return {}
 
 
+def _cookies_for_domain(client: httpx.Client, domain: str) -> dict[str, str]:
+	"""只提取指定站点域的 cookies，避免 OAuth 跨域 cookie 泄露。"""
+	host = urlparse(domain).hostname or ''
+	cookies: dict[str, str] = {}
+	for cookie in client.cookies.jar:
+		cookie_domain = (cookie.domain or '').lstrip('.').lower()
+		if cookie_domain and (host == cookie_domain or host.endswith(f'.{cookie_domain}')):
+			if cookie.name and cookie.value:
+				cookies[cookie.name] = cookie.value
+	return cookies
+
+
 async def get_waf_cookies_with_browser(
 	account_name: str,
 	login_url: str,
@@ -122,16 +135,16 @@ async def get_waf_cookies_with_browser(
 	*,
 	use_proxy: bool = False,
 ):
-	"""使用浏览器获取 WAF cookies"""
+	"""使用浏览器获取 WAF cookies。"""
 	log.info(f'{account_name}: 启动浏览器获取 WAF cookies...')
 
 	launch_kwargs: dict = {'headless': True}
 	proxy = get_playwright_proxy(use_proxy=use_proxy)
 	if proxy:
 		launch_kwargs['proxy'] = proxy
-	browser = await launch_async(**launch_kwargs)
-
+	browser = None
 	try:
+		browser = await launch_async(**launch_kwargs)
 		page = await browser.new_page()
 		await prepare_browser_page(page)
 		log.info(f'{account_name}: 访问登录页面获取初始 cookies...')
@@ -140,31 +153,26 @@ async def get_waf_cookies_with_browser(
 		await wait_for_waf_ready(page)
 
 		cookies = await page.context.cookies()
-
-		waf_cookies = {}
-		for cookie in cookies:
-			cookie_name = cookie.get('name')
-			cookie_value = cookie.get('value')
-			if cookie_name in required_cookies and cookie_value is not None:
-				waf_cookies[cookie_name] = cookie_value
+		waf_cookies = {
+			cookie['name']: cookie['value']
+			for cookie in cookies
+			if cookie.get('name') in required_cookies and cookie.get('value') is not None
+		}
 
 		log.info(f'{account_name}: 获取到 {len(waf_cookies)} 个 WAF cookies')
-
-		missing_cookies = [c for c in required_cookies if c not in waf_cookies]
-
+		missing_cookies = [name for name in required_cookies if name not in waf_cookies]
 		if missing_cookies:
 			log.failed(f'{account_name}: 缺少 WAF cookies: {missing_cookies}')
-			await browser.close()
 			return None
 
 		log.success(f'{account_name}: 成功获取所有 WAF cookies')
-		await browser.close()
 		return waf_cookies
-
 	except Exception as e:
 		log.failed(f'{account_name}: 获取 WAF cookies 时出错: {e}')
-		await browser.close()
 		return None
+	finally:
+		if browser is not None:
+			await browser.close()
 
 
 async def login_with_credentials(
@@ -193,14 +201,10 @@ async def login_with_credentials(
 
 	log.info(f'{account_name}: 提供商代理={"已启用" if provider_config.use_proxy else "已禁用"} ({provider_name})')
 
-	try:
-		context = await launch_login_context(settings, use_proxy=provider_config.use_proxy)
-	except Exception as e:
-		log.failed(f'{account_name}: 浏览器启动失败: {e}')
-		return None
-
+	context = None
 	page = None
 	try:
+		context = await launch_login_context(settings, use_proxy=provider_config.use_proxy)
 		page = await context.new_page()
 		await prepare_browser_page(page)
 		await navigate_login_page(
@@ -235,7 +239,6 @@ async def login_with_credentials(
 			log.debug(f'{account_name}: 当前 URL: {page.url}')
 			log.debug(f'{account_name}: 获取到 cookies: {cookie_names}')
 			await save_login_screenshot(page, provider_name, account_name, 'not-authenticated')
-			await context.close()
 			return None
 
 		cookies = await context.cookies()
@@ -250,15 +253,16 @@ async def login_with_credentials(
 		log.success(f'{account_name}: 登录成功，已获取 {len(all_cookies)} 个 cookies')
 		if is_debug_enabled() and api_user:
 			log.debug(f'{account_name}: api_user={api_user}')
-		await context.close()
 		return BrowserLoginResult(cookies=all_cookies, api_user=api_user)
 
 	except Exception as e:
 		log.failed(f'{account_name}: 登录过程中出错: {e}')
 		if page is not None:
 			await save_login_screenshot(page, provider_name, account_name, 'login-error')
-		await context.close()
 		return None
+	finally:
+		if context is not None:
+			await context.close()
 
 
 async def login_with_github_oauth(
@@ -328,7 +332,9 @@ async def login_with_github_oauth(
 
 		# Step 2: 用 GitHub user_session 获取授权 code
 		log.debug(f'{account_name}: 第2步 - 获取 GitHub OAuth code...')
-		auth_url = f'https://github.com/login/oauth/authorize?client_id={github_client_id}&state={state}'
+		auth_url = (
+			f'https://github.com/login/oauth/authorize?{urlencode({"client_id": github_client_id, "state": state})}'
+		)
 		try:
 			# 用显式 Cookie 头而非 per-request cookies=（后者已被 httpx 弃用），
 			# 同时避免 GitHub 会话进入 client 的 cookie jar 后被带到站点域。
@@ -365,7 +371,8 @@ async def login_with_github_oauth(
 
 		# Step 3: OAuth 回调，触发登录+签到
 		log.debug(f'{account_name}: 第3步 - OAuth 回调...')
-		callback_url = f'{domain}{provider_config.oauth_callback_path}?code={code}&state={state}&mode=login'
+		callback_query = urlencode({'code': code, 'state': state, 'mode': 'login'})
+		callback_url = f'{domain}{provider_config.oauth_callback_path}?{callback_query}'
 		try:
 			cb_resp = request_with_retry(client, 'GET', callback_url, timeout=30)
 		except Exception as e:
@@ -397,13 +404,18 @@ async def login_with_github_oauth(
 		checked_in = user_data.get('checked_in', False)
 		log.info(f'{account_name}: 登录成功，已签到状态={checked_in}')
 
-		all_cookies = dict(client.cookies)
+		all_cookies = _cookies_for_domain(client, domain)
 		log.success(f'{account_name}: OAuth 登录成功，获取到 {len(all_cookies)} 个 cookies')
 		return BrowserLoginResult(cookies=all_cookies, api_user=api_user)
 
 
-def get_user_info(client, headers, user_info_url: str):
-	"""获取用户信息（带重试）"""
+def get_user_info(client, headers, user_info_url: str, *, propagate_network_error: bool = True):
+	"""获取用户信息（带重试）。
+
+	propagate_network_error=True（默认）时，网络异常及可重试状态耗尽会向上抛出，
+	交由外层触发代理节点切换重试。签到成功后查询余额应传 False，避免已成功的
+	签到被误判为节点问题而重复签到。
+	"""
 	try:
 		response = request_with_retry(client, 'GET', user_info_url, headers=headers, timeout=30)
 
@@ -417,11 +429,21 @@ def get_user_info(client, headers, user_info_url: str):
 					'success': True,
 					'quota': quota,
 					'used_quota': used_quota,
-					'display': f':money: Current balance: ${quota}, Used: ${used_quota}',
+					'display': f':money: 当前余额: ${quota}, 已用: ${used_quota}',
 				}
-		return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}'}
+		return {'success': False, 'error': f'获取用户信息失败: HTTP {response.status_code}'}
+	except _NETWORK_ERRORS as e:
+		if propagate_network_error:
+			raise
+		return {'success': False, 'error': f'获取用户信息失败: {str(e)[:50]}...'}
+	except RetryExhaustedError as e:
+		if propagate_network_error:
+			raise
+		return {'success': False, 'error': f'获取用户信息失败: {str(e)[:50]}...'}
+	except RuntimeError as e:
+		return {'success': False, 'error': f'获取用户信息失败: {str(e)[:50]}...'}
 	except Exception as e:
-		return {'success': False, 'error': f'Failed to get user info: {str(e)[:50]}...'}
+		return {'success': False, 'error': f'获取用户信息失败: {str(e)[:50]}...'}
 
 
 async def prepare_cookies(account_name: str, provider_config, user_cookies: dict) -> dict | None:
@@ -442,7 +464,7 @@ async def prepare_cookies(account_name: str, provider_config, user_cookies: dict
 	else:
 		log.info(f'{account_name}: 无需绕过 WAF，直接使用用户 cookies')
 
-	return {**waf_cookies, **user_cookies}
+	return {**user_cookies, **waf_cookies}
 
 
 def execute_check_in(client, account_name: str, provider_config, headers: dict):
@@ -670,11 +692,12 @@ def run_check_in_requests(
 			if user_info_before and user_info_before.get('success'):
 				log.info(f'{account_name}: {user_info_before["display"]}')
 			elif user_info_before:
-				log.failed(f'{account_name}: {user_info_before.get("error", "Unknown error")}')
+				log.failed(f'{account_name}: {user_info_before.get("error", "未知错误")}')
 
 			if provider_config.needs_manual_check_in():
 				success = execute_check_in(client, account_name, provider_config, headers)
-				user_info_after = get_user_info(client, headers, user_info_url)
+				# 签到已发出，查询余额的网络异常不再触发节点重试，避免已成功的签到被重复提交
+				user_info_after = get_user_info(client, headers, user_info_url, propagate_network_error=False)
 				return success, user_info_before, user_info_after
 
 			user_info_after = get_user_info(client, headers, user_info_url)
@@ -749,7 +772,7 @@ async def main():
 		log.info('调试模式已开启')
 		proxy_server = os.getenv('CHECKIN_PROXY_URL', '').strip()
 		if proxy_server:
-			log.info(f'代理端点可用: {proxy_server}（根据提供商 use_proxy 启用）')
+			log.info(f'代理端点可用: {redact_proxy_url(proxy_server)}（根据提供商 use_proxy 启用）')
 		else:
 			log.info('未设置 CHECKIN_PROXY_URL；use_proxy=true 的提供商将在无代理下运行')
 	else:
@@ -849,7 +872,7 @@ async def main():
 
 			if should_notify_this_account:
 				account_name = account.get_display_name(i)
-				status = '[SUCCESS]' if success else '[FAIL]'
+				status = '[成功]' if success else '[失败]'
 				account_result = f'{status} {account_name}'
 				if user_info_after and user_info_after.get('success'):
 					account_result += f'\n{user_info_after["display"]}'
@@ -862,7 +885,7 @@ async def main():
 			account_name = account.get_display_name(i)
 			log.failed(f'{account_name} 处理异常: {e}')
 			need_notify = True
-			notification_content.append(f'[FAIL] {account_name} exception: {str(e)[:50]}...')
+			notification_content.append(f'[失败] {account_name} 异常: {str(e)[:50]}...')
 			notified_account_keys.add(account_key)
 
 	current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
@@ -891,31 +914,31 @@ async def main():
 
 	if need_notify and notification_content:
 		summary = [
-			'[STATS] Check-in result statistics:',
-			f'[SUCCESS] Success: {success_count}/{total_count}',
-			f'[FAIL] Failed: {total_count - success_count}/{total_count}',
+			'[统计] 签到结果统计:',
+			f'[成功] 成功: {success_count}/{total_count}',
+			f'[失败] 失败: {total_count - success_count}/{total_count}',
 		]
 
 		if success_count == total_count:
-			summary.append('[SUCCESS] All accounts check-in successful!')
+			summary.append('[成功] 全部账号签到成功!')
 		elif success_count > 0:
-			summary.append('[WARN] Some accounts check-in successful')
+			summary.append('[警告] 部分账号签到成功')
 		else:
-			summary.append('[ERROR] All accounts check-in failed')
+			summary.append('[错误] 全部账号签到失败')
 
-		time_info = f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
+		time_info = f'[时间] 执行时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
 
 		notify_content = '\n\n'.join([time_info, '\n'.join(notification_content), '\n'.join(summary)])
 		screenshot_paths = take_pending_screenshots() if is_debug_enabled() else []
 		if screenshot_paths:
 			github_run_id = os.getenv('GITHUB_RUN_ID', '').strip()
 			github_repo = os.getenv('GITHUB_REPOSITORY', '').strip()
-			screenshot_hint = f'[SCREENSHOT] {len(screenshot_paths)} debug screenshot(s) saved'
+			screenshot_hint = f'[截图] 已保存 {len(screenshot_paths)} 张调试截图'
 			if github_run_id and github_repo:
 				run_url = f'https://github.com/{github_repo}/actions/runs/{github_run_id}'
-				screenshot_hint += f'. Download artifact `checkin-screenshots-{github_run_id}` from: {run_url}'
+				screenshot_hint += f'。可从 Actions 下载 artifact `checkin-screenshots-{github_run_id}`：{run_url}'
 			else:
-				screenshot_hint += ' to `checkin_screenshots/`'
+				screenshot_hint += '，保存到 `checkin_screenshots/` 目录'
 			notify_content += f'\n\n{screenshot_hint}'
 
 		print(notify_content)

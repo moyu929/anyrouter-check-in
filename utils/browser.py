@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from utils.debug import debug_print, is_debug_enabled
 from utils.popups import dismiss_popups, setup_popup_guard
-from utils.proxy import get_playwright_proxy
+from utils.proxy import get_playwright_proxy, redact_proxy_url
 
 if TYPE_CHECKING:
 	from playwright.async_api import BrowserContext, Locator, Page
@@ -162,11 +162,16 @@ def _env_bool(name: str, default: bool) -> bool:
 	return raw.strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
+def _sanitize_profile_part(value: str) -> str:
+	cleaned = re.sub(r'[^\w.-]+', '_', value.strip()).strip(' .')
+	return cleaned or 'unknown'
+
+
 def load_browser_login_settings(
 	account_name: str, provider: str, *, persist_profile: bool = True
 ) -> BrowserLoginSettings:
 	profile_base = Path(os.getenv('CHECKIN_BROWSER_PROFILE_DIR', '.browser_profiles'))
-	profile_dir = profile_base / provider / account_name
+	profile_dir = profile_base / _sanitize_profile_part(provider) / _sanitize_profile_part(account_name)
 	humanize = _env_bool('CHECKIN_HUMANIZE', True)
 	if provider == 'agentrouter':
 		humanize = _env_bool('CHECKIN_HUMANIZE_AGENTROUTER', humanize)
@@ -215,11 +220,11 @@ async def launch_login_context(settings: BrowserLoginSettings, *, use_proxy: boo
 	if proxy:
 		launch_kwargs['proxy'] = proxy
 		if is_debug_enabled():
-			print(f'[INFO] Browser proxy enabled: {proxy["server"]}')
+			print(f'[信息] 浏览器代理已启用: {redact_proxy_url(proxy["server"])}')
 		else:
-			print('[INFO] Browser proxy enabled')
+			print('[信息] 浏览器代理已启用')
 	elif use_proxy:
-		print('[WARN] Provider requires proxy but CHECKIN_PROXY_URL is not set')
+		print('[警告] 该提供商需要代理，但未设置 CHECKIN_PROXY_URL')
 
 	if settings.persist_profile:
 		from cloakbrowser import launch_persistent_context_async
@@ -234,7 +239,11 @@ async def launch_login_context(settings: BrowserLoginSettings, *, use_proxy: boo
 
 	context_kwargs = {'viewport': launch_kwargs.pop('viewport')}
 	browser = await launch_async(**launch_kwargs)
-	context = await browser.new_context(**context_kwargs)
+	try:
+		context = await browser.new_context(**context_kwargs)
+	except BaseException:
+		await browser.close()
+		raise
 	# _EphemeralBrowserContext 通过 __getattr__ 代理 BrowserContext 的全部接口，
 	# 额外在 close() 时连带关闭 browser。
 	return cast('BrowserContext', _EphemeralBrowserContext(context, browser))
@@ -269,10 +278,10 @@ async def save_login_screenshot(
 	try:
 		await page.screenshot(path=str(path), full_page=True, timeout=15_000)
 		_pending_notify_screenshots.append(path)
-		print(f'[INFO] Screenshot saved: {path}')
+		print(f'[信息] 已保存截图: {path}')
 		return path
 	except Exception as exc:
-		print(f'[WARN] Failed to save screenshot ({label}): {exc}')
+		print(f'[警告] 保存截图失败 ({label}): {exc}')
 		return None
 
 
@@ -297,7 +306,7 @@ async def wait_for_site_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS
 		await asyncio.sleep(3)
 	closed = await dismiss_popups(page)
 	if closed:
-		print(f'[INFO] Dismissed {closed} popup dialog(s)')
+		print(f'[信息] 已关闭 {closed} 个弹窗')
 
 
 async def _wait_for_optional_load_state(
@@ -307,7 +316,7 @@ async def _wait_for_optional_load_state(
 		await page.wait_for_load_state(state, timeout=timeout_ms)
 		return True
 	except Exception as exc:  # nosec B110
-		debug_print(f'[INFO] Optional load state "{state}" not reached within {timeout_ms}ms: {exc}')
+		debug_print(f'[信息] 可选加载状态 "{state}" 在 {timeout_ms}ms 内未达到: {exc}')
 		return False
 
 
@@ -341,17 +350,17 @@ async def navigate_login_page(
 	attempt_timeout = min(timeout_ms, 60_000)
 
 	try:
-		print(f'[INFO] Warming up {base_url} before login')
+		print(f'[信息] 登录前正在预热 {base_url}')
 		await page.goto(base_url, wait_until='load', timeout=attempt_timeout)
 		await _settle_page(page, 3, 15_000)
 		closed = await dismiss_popups(page)
 		if closed:
-			print(f'[INFO] Dismissed {closed} popup dialog(s) during warmup')
+			print(f'[信息] 预热期间已关闭 {closed} 个弹窗')
 	except Exception as exc:
-		print(f'[WARN] Warmup navigation failed: {exc}')
+		print(f'[警告] 预热导航失败: {exc}')
 
 	for attempt in range(3):
-		print(f'[INFO] Navigating login page (attempt {attempt + 1}/3): {login_url}')
+		print(f'[信息] 正在导航到登录页 (第 {attempt + 1}/3 次): {login_url}')
 		await page.goto(login_url, wait_until='load', timeout=attempt_timeout)
 		await _settle_page(page, 5, 20_000)
 
@@ -360,7 +369,7 @@ async def navigate_login_page(
 			if await page.evaluate(_LOGIN_SHELL_READY_JS):
 				return
 
-		print(f'[WARN] Login page shell not ready on attempt {attempt + 1}')
+		print(f'[警告] 第 {attempt + 1} 次登录页框架未就绪')
 		await _log_login_page_state(page)
 		if provider and account_name:
 			await save_login_screenshot(page, provider, account_name, f'login-shell-attempt-{attempt + 1}')
@@ -442,7 +451,7 @@ async def verify_browser_login(page: Page, console_url: str, timeout_ms: int) ->
 
 	page.on('response', on_response)
 	try:
-		print(f'[INFO] Verifying login via {console_url} and {USER_SELF_API_SUFFIX}')
+		print(f'[信息] 通过 {console_url} 和 {USER_SELF_API_SUFFIX} 验证登录')
 		await page.goto(console_url, wait_until='load', timeout=min(timeout_ms, 60_000))
 		try:
 			await page.wait_for_load_state('networkidle', timeout=20_000)
@@ -461,16 +470,16 @@ async def verify_browser_login(page: Page, console_url: str, timeout_ms: int) ->
 		if is_debug_enabled():
 			user_id = captured_profile.get('id')
 			username = captured_profile.get('username', '')
-			print(f'[INFO] Login verified via {USER_SELF_API_SUFFIX}: id={user_id}, username={username}')
+			print(f'[信息] 已通过 {USER_SELF_API_SUFFIX} 验证登录: id={user_id}, username={username}')
 		else:
-			print('[INFO] Login verified')
+			print('[信息] 登录验证通过')
 		return captured_profile
 
 	if CONSOLE_PATH in page.url.lower():
-		print(f'[WARN] Reached {CONSOLE_PATH} but {USER_SELF_API_SUFFIX} returned no user profile')
+		print(f'[警告] 已到达 {CONSOLE_PATH}，但 {USER_SELF_API_SUFFIX} 未返回用户信息')
 	else:
-		debug_print(f'[WARN] Login verification failed: current URL={page.url}')
-		print('[WARN] Login verification failed')
+		debug_print(f'[警告] 登录验证失败: 当前 URL={page.url}')
+		print('[警告] 登录验证失败')
 	return None
 
 
@@ -604,7 +613,7 @@ async def _log_login_page_state(page: Page) -> None:
 			};
 		}"""
 	)
-	debug_print(f'[INFO] Login page state: {state}')
+	debug_print(f'[信息] 登录页状态: {state}')
 
 
 async def _open_email_login_form(
@@ -664,7 +673,7 @@ async def _open_email_login_form(
 	if remaining_ms > 0 and await _wait_for_username_input(page, remaining_ms):
 		return
 
-	debug_print(f'[INFO] Login page URL: {page.url}')
+	debug_print(f'[信息] 登录页 URL: {page.url}')
 	await _log_login_page_state(page)
 	if provider and account_name:
 		await save_login_screenshot(page, provider, account_name, 'email-form-timeout')

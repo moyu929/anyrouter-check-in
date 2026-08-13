@@ -239,6 +239,8 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
 | `PROXY_RETRY_TIMES`      | `3`                                    | Python            | 代理节点问题（WAF/5xx/超时）时，切换节点重试的最多次数，含最后一次直连兜底         |
 | `MIHOMO_CONTROLLER`      | —                                      | Python            | mihomo REST API 地址，由代理脚本自动写入 `GITHUB_ENV`，无需手动设置                |
 | `MIHOMO_CONTROLLER_PORT` | `9090`                                 | CI 脚本           | mihomo REST API 端口，可覆盖默认值                                                  |
+| `MIHOMO_SECRET_FILE`     | —                                      | Python            | mihomo REST API secret 文件路径，由代理脚本自动写入 `GITHUB_ENV`，无需手动设置     |
+| `PROXY_NODE_DELAY_TIMEOUT_MS` | `3000`                            | Python            | 节点测延迟超时（毫秒），测速超时/失败的节点会被排除，然后选最低延迟可用节点         |
 
 ### 4.4 通知
 

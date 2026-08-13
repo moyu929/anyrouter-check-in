@@ -145,7 +145,7 @@ class TestGetUserInfo:
 			'success': True,
 			'quota': 100.0,
 			'used_quota': 25.0,
-			'display': ':money: Current balance: $100.0, Used: $25.0',
+			'display': ':money: 当前余额: $100.0, 已用: $25.0',
 		}
 
 	def test_missing_quota_fields_default_to_zero(self):
@@ -179,7 +179,13 @@ class TestGetUserInfo:
 		assert info['success'] is False
 		assert 'HTTP 403' in info['error']
 
-	def test_invalid_json_is_caught(self):
+	def test_network_error_is_propagated_for_node_retry(self):
+		def handler(request: httpx.Request) -> httpx.Response:
+			raise httpx.ConnectError('node unavailable', request=request)
+
+		with _mock_client(handler) as client, pytest.raises(httpx.ConnectError):
+			get_user_info(client, {}, 'https://example.com/api/user/self')
+
 		def handler(request: httpx.Request) -> httpx.Response:
 			return httpx.Response(200, text='<html>WAF</html>')
 
@@ -187,7 +193,7 @@ class TestGetUserInfo:
 			info = get_user_info(client, {}, 'https://example.com/api/user/self')
 
 		assert info['success'] is False
-		assert 'Failed to get user info' in info['error']
+		assert '获取用户信息失败' in info['error']
 
 
 class TestExecuteCheckIn:

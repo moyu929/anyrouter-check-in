@@ -21,6 +21,7 @@ from utils.proxy import (
 	get_proxy_test_url,
 	is_proxy_configured,
 	needs_proxy,
+	redact_proxy_url,
 	reset_proxy_cache,
 )
 
@@ -123,8 +124,15 @@ class TestProxySwitch:
 
 		assert get_proxy_test_url() == 'https://example.com/204'
 
+	def test_proxy_address_change_forces_retest(self, monkeypatch):
+		calls: list[str] = []
+		monkeypatch.setattr(proxy_module, '_test_proxy', lambda url: calls.append(url) or True)
+		monkeypatch.setenv('CHECKIN_PROXY_URL', 'http://proxy-a:7890')
+		assert get_proxy_server(use_proxy=True) == 'http://proxy-a:7890'
+		monkeypatch.setenv('CHECKIN_PROXY_URL', 'http://proxy-b:7890')
+		assert get_proxy_server(use_proxy=True) == 'http://proxy-b:7890'
+		assert calls == ['http://proxy-a:7890', 'http://proxy-b:7890']
 
-class TestCreateClient:
 	def test_no_proxy_when_use_proxy_false(self, monkeypatch):
 		monkeypatch.setenv('CHECKIN_PROXY_URL', 'http://127.0.0.1:7890')
 		_stub_proxy_test(monkeypatch, reachable=True)
@@ -313,7 +321,9 @@ class TestRequestWithRetry:
 class TestNeedsProxy:
 	@staticmethod
 	def _config(providers: dict) -> AppConfig:
-		return AppConfig(providers={k: ProviderConfig(name=k, domain='https://x.com', use_proxy=v) for k, v in providers.items()})
+		return AppConfig(
+			providers={k: ProviderConfig(name=k, domain='https://x.com', use_proxy=v) for k, v in providers.items()}
+		)
 
 	def test_true_when_any_used_provider_uses_proxy(self):
 		app = self._config({'a': True, 'b': False})
@@ -361,6 +371,17 @@ class TestRedactUrl:
 	def test_returns_url_unchanged_without_sensitive_params(self):
 		url = 'https://example.com/path?a=1&b=2'
 		assert _redact_url(url) == url
+
+	def test_proxy_url_credentials_are_redacted(self):
+		redacted = redact_proxy_url('http://synthetic-user:synthetic-password@proxy.example:7890?token=secret#fragment')
+
+		assert redacted == 'http://proxy.example:7890'
+		assert 'synthetic-user' not in redacted
+		assert 'synthetic-password' not in redacted
+		assert 'secret' not in redacted
+
+	def test_proxy_url_supports_ipv6(self):
+		assert redact_proxy_url('http://user:pw@[::1]:7890') == 'http://[::1]:7890'
 
 	def test_case_insensitive_sensitive_param_names(self):
 		red = _redact_url('https://x.com?Code=ABC&State=XYZ&Token=123')

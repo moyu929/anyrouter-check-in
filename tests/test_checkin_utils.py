@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import os
-from pathlib import Path
-
 import httpx
 import pytest
 
@@ -24,10 +20,10 @@ from checkin import (
 )
 from utils.config import AccountConfig, AppConfig, ProviderConfig
 
-
 # ============================================================
 # 余额哈希与持久化
 # ============================================================
+
 
 class TestBalanceHash:
 	@pytest.fixture
@@ -81,6 +77,7 @@ class TestBalanceHash:
 # Cookie 解析
 # ============================================================
 
+
 class TestParseCookies:
 	def test_dict_passthrough(self):
 		d = {'a': '1', 'b': '2'}
@@ -112,6 +109,7 @@ class TestParseCookies:
 # ============================================================
 # 金额格式化与通知格式化
 # ============================================================
+
 
 class TestFormatAmount:
 	def test_usd_formats_with_dollar_sign(self):
@@ -154,7 +152,11 @@ class TestFormatCheckInNotification:
 
 	def test_already_checked_no_change(self):
 		detail = self._base_detail(
-			after_quota=10.0, after_used=1.0, check_in_reward=0, usage_increase=0, balance_change=0,
+			after_quota=10.0,
+			after_used=1.0,
+			check_in_reward=0,
+			usage_increase=0,
+			balance_change=0,
 		)
 		text = format_check_in_notification(detail)
 		assert '今日已签到，无变化' in text
@@ -162,7 +164,11 @@ class TestFormatCheckInNotification:
 
 	def test_used_only_without_reward(self):
 		detail = self._base_detail(
-			after_quota=9.8, after_used=1.2, check_in_reward=0, usage_increase=0.2, balance_change=-0.2,
+			after_quota=9.8,
+			after_used=1.2,
+			check_in_reward=0,
+			usage_increase=0.2,
+			balance_change=-0.2,
 		)
 		text = format_check_in_notification(detail)
 		assert '今日已签到（期间有使用）' in text
@@ -185,6 +191,7 @@ class TestFormatCheckInNotification:
 # get_user_info — 用 MockTransport 拦截 HTTP
 # ============================================================
 
+
 class TestGetUserInfo:
 	@staticmethod
 	def _client(handler):
@@ -205,15 +212,14 @@ class TestGetUserInfo:
 		assert '$1.0' in info['display']
 		assert '$0.5' in info['display']
 
-	def test_non_200_returns_error(self):
+	def test_non_200_retryable_error_is_propagated(self, monkeypatch):
+		monkeypatch.setattr('utils.http_client.time.sleep', lambda _s: None)
+
 		def h(req):
 			return httpx.Response(500)
 
-		with self._client(h) as c:
-			info = get_user_info(c, {}, 'https://example.com/api/user/self')
-
-		assert info['success'] is False
-		assert 'HTTP 500' in info['error']
+		with self._client(h) as c, pytest.raises(RuntimeError, match='HTTP 500'):
+			get_user_info(c, {}, 'https://example.com/api/user/self')
 
 	def test_success_false_payload_returns_error(self):
 		def h(req):
@@ -224,26 +230,59 @@ class TestGetUserInfo:
 
 		assert info['success'] is False
 
-	def test_network_exception_is_caught(self):
+	def test_network_exception_is_propagated_for_proxy_retry(self):
 		def h(req):
 			raise httpx.ConnectError('boom', request=req)
+
+		with self._client(h) as c, pytest.raises(httpx.ConnectError):
+			get_user_info(c, {}, 'https://example.com/api/user/self')
+
+	def test_invalid_json_is_reported_as_failure(self):
+		def h(req):
+			return httpx.Response(200, text='<html>not json</html>')
 
 		with self._client(h) as c:
 			info = get_user_info(c, {}, 'https://example.com/api/user/self')
 
 		assert info['success'] is False
-		assert 'Failed to get user info' in info['error']
+		assert '获取用户信息失败' in info['error']
+
+	def test_network_error_not_propagated_when_post_checkin(self, monkeypatch):
+		"""签到成功后查询余额的网络异常不应向上抛（避免重复签到）。"""
+		monkeypatch.setattr('utils.http_client.time.sleep', lambda _s: None)
+
+		def h(req):
+			raise httpx.ConnectError('boom', request=req)
+
+		with self._client(h) as c:
+			info = get_user_info(c, {}, 'https://example.com/api/user/self', propagate_network_error=False)
+
+		assert info['success'] is False
+		assert '获取用户信息失败' in info['error']
+
+	def test_retry_exhausted_not_propagated_when_post_checkin(self, monkeypatch):
+		monkeypatch.setattr('utils.http_client.time.sleep', lambda _s: None)
+
+		def h(req):
+			return httpx.Response(500)
+
+		with self._client(h) as c:
+			info = get_user_info(c, {}, 'https://example.com/api/user/self', propagate_network_error=False)
+
+		assert info['success'] is False
+		assert '获取用户信息失败' in info['error']
 
 
 # ============================================================
-# execute_check_in — 模拟各种签到响应
-# ============================================================
+
 
 class TestExecuteCheckIn:
 	@staticmethod
 	def _provider():
 		return ProviderConfig(
-			name='tp', domain='https://example.com', sign_in_path='/api/user/checkin',
+			name='tp',
+			domain='https://example.com',
+			sign_in_path='/api/user/checkin',
 		)
 
 	@staticmethod
@@ -275,6 +314,7 @@ class TestExecuteCheckIn:
 
 	def test_already_checked_keywords_treated_as_success(self):
 		for keyword in ['已经签到', '已签到', '重复签到', 'already checked', 'Already Signed!']:
+
 			def h(req, kw=keyword):
 				return httpx.Response(200, json={'code': 1, 'msg': kw})
 
@@ -304,6 +344,7 @@ class TestExecuteCheckIn:
 
 	def test_http_400_client_error_is_failure(self):
 		"""4xx 不重试，直接返回 False。"""
+
 		def h(req):
 			return httpx.Response(400, json={'success': False})
 
@@ -328,6 +369,7 @@ class TestExecuteCheckIn:
 # ============================================================
 # run_check_in_requests — mock HTTP 客户端层，测流程分支
 # ============================================================
+
 
 class _FakeProvider:
 	"""最小 ProviderConfig 替身（仅暴露 run_check_in_requests 实际用到的属性）。"""
@@ -397,7 +439,10 @@ class TestRunCheckInRequests:
 		self._install_handler(monkeypatch, handlers)
 
 		ok, before, after = run_check_in_requests(
-			{'session': 'abc'}, self._account(), 'Acc1', _FakeProvider(),
+			{'session': 'abc'},
+			self._account(),
+			'Acc1',
+			_FakeProvider(),
 		)
 
 		assert ok is True
@@ -408,6 +453,7 @@ class TestRunCheckInRequests:
 
 	def test_auto_check_in_no_button_success(self, monkeypatch):
 		"""sign_in_path=None — 仅靠两次 user_info 请求即可视为自动签到成功。"""
+
 		def user_info_handler(req):
 			return httpx.Response(200, json={'success': True, 'data': {'quota': 500000, 'used_quota': 50000}})
 
@@ -418,7 +464,10 @@ class TestRunCheckInRequests:
 		provider.__dict__['needs_manual_check_in'] = lambda: False
 
 		ok, before, after = run_check_in_requests(
-			{'session': 'abc'}, self._account(), 'Acc2', provider,
+			{'session': 'abc'},
+			self._account(),
+			'Acc2',
+			provider,
 		)
 
 		assert ok is True
@@ -434,7 +483,10 @@ class TestRunCheckInRequests:
 		provider.__dict__['needs_manual_check_in'] = lambda: False
 
 		ok, before, after = run_check_in_requests(
-			{'session': 'abc'}, self._account(), 'Acc3', provider,
+			{'session': 'abc'},
+			self._account(),
+			'Acc3',
+			provider,
 		)
 
 		assert ok is False
@@ -461,6 +513,7 @@ class TestRunCheckInRequests:
 # ============================================================
 # 异常分支：run_check_in_requests 网络异常 → ProxyNodeIssue
 # ============================================================
+
 
 class TestRunCheckInRequestsNetworkErrors:
 	def test_connect_error_raises_proxy_node_issue(self, monkeypatch):
@@ -523,6 +576,7 @@ class TestRunCheckInRequestsNetworkErrors:
 # check_in_account 各种分支：无真实网络，全部 monkeypatch 子调用
 # ============================================================
 
+
 class _FakeProvider2:
 	"""可编程的 ProviderConfig 替身，dataclass 风格字段。"""
 
@@ -555,6 +609,7 @@ class TestCheckInAccount:
 	@staticmethod
 	def _run(coro):
 		import asyncio
+
 		return asyncio.run(coro)
 
 	# ----------------------------------------------------- 分支 1：无效 provider

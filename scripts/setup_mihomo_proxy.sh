@@ -90,6 +90,30 @@ fi
 chmod +x "mihomo-linux-amd64-${MIHOMO_VERSION}"
 MIHOMO_BIN="${PROXY_DIR}/mihomo-linux-amd64-${MIHOMO_VERSION}"
 
+# 拉取订阅并转换为 Clash 格式：mihomo 的 proxy-providers 无法直接解析 v2rayN base64 订阅，
+# 必须先转换成含 proxies: 列表的 YAML 再以 file provider 加载。
+echo "[信息] 正在拉取订阅..."
+if ! curl --retry 3 --retry-delay 5 --retry-all-errors -fsSL -o "${PROXY_DIR}/subscription.raw" \
+	"${PROXY_SUBSCRIPTION_URL}"; then
+	echo "[失败] 订阅拉取失败"
+	if [[ "${PROXY_REQUIRED}" == "true" ]]; then
+		exit 1
+	fi
+	echo "[警告] 跳过代理初始化，将直连签到"
+	exit 0
+fi
+
+echo "[信息] 正在转换订阅为 Clash 格式..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! python3 "${SCRIPT_DIR}/convert_subscribe.py" "${PROXY_DIR}/subscription.raw" > "${PROXY_DIR}/subscription.yaml"; then
+	echo "[失败] 订阅转换失败（无法识别的订阅格式）"
+	if [[ "${PROXY_REQUIRED}" == "true" ]]; then
+		exit 1
+	fi
+	echo "[警告] 跳过代理初始化，将直连签到"
+	exit 0
+fi
+
 cat > config.yaml <<EOF
 mixed-port: ${PROXY_PORT}
 allow-lan: false
@@ -104,9 +128,7 @@ secret: "${PROXY_SECRET}"
 
 proxy-providers:
   subscription:
-    type: http
-    url: "${PROXY_SUBSCRIPTION_URL}"
-    interval: 3600
+    type: file
     path: ./subscription.yaml
     health-check:
       enable: true
@@ -142,8 +164,6 @@ proxy-groups:
       - 🇭🇰 香港
 
 rules:
-  # 订阅拉取直连，避免走代理自身形成循环依赖
-  - DOMAIN-KEYWORD,mjurl.com,DIRECT
   - MATCH,AUTO
 EOF
 

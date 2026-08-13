@@ -14,6 +14,7 @@ fi
 # 清理临时产物（订阅缓存、secret、配置、日志、本地 env 导出文件），避免残留敏感信息
 if [[ -d "${PROXY_DIR}" ]]; then
 	rm -f \
+		"${PROXY_DIR}/subscription.raw" \
 		"${PROXY_DIR}/subscription.yaml" \
 		"${PROXY_DIR}/proxy-secret" \
 		"${PROXY_DIR}/config.yaml" \

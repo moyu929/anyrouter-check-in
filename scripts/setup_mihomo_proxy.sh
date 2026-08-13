@@ -50,7 +50,12 @@ import sys, json
 try:
     tag = json.load(sys.stdin)
     digest = next((a.get("digest", "") for a in tag.get("assets", []) if a.get("name") == "'"${ARCHIVE}"'"), "")
-    print(digest.split("=")[-1] if digest else "")
+    # GitHub asset digest 形如 "sha256:xxx"，解析出 64 位纯 hex；格式异常则跳过校验
+    if isinstance(digest, str) and digest.startswith("sha256:"):
+        hexdigest = digest[7:]
+        print(hexdigest if len(hexdigest) == 64 else "")
+    else:
+        print("")
 except Exception:
     print("")
 ' 2>/dev/null || echo ""
@@ -58,16 +63,30 @@ except Exception:
 if [[ -n "${EXPECTED_SHA}" ]]; then
 	ACTUAL_SHA="$(sha256sum "${ARCHIVE}" | awk '{print $1}')"
 	if [[ "${ACTUAL_SHA}" != "${EXPECTED_SHA}" ]]; then
-		echo "[失败] mihomo 下载文件 SHA-256 校验失败，与官方 digest 不一致"
+		echo "[失败] mihomo 下载文件 SHA-256 校验失败（与官方 digest 不一致，或下载损坏）"
 		rm -f "${ARCHIVE}"
-		exit 1
+		# 与"下载失败"降级逻辑一致：非必需代理时不阻塞签到，直连继续
+		if [[ "${PROXY_REQUIRED}" == "true" ]]; then
+			exit 1
+		fi
+		echo "[警告] 跳过代理初始化，将直连签到"
+		exit 0
 	fi
 	echo "[信息] mihomo SHA-256 校验通过"
 else
 	echo "[警告] 无法获取 mihomo 官方 SHA-256，跳过校验（不影响代理启动）"
 fi
 
-gunzip -f "${ARCHIVE}"
+# 解压失败（跳过校验时下载文件已损坏）同样按降级处理，避免阻塞签到
+if ! gunzip -f "${ARCHIVE}"; then
+	echo "[失败] mihomo 压缩包解压失败"
+	rm -f "${ARCHIVE}"
+	if [[ "${PROXY_REQUIRED}" == "true" ]]; then
+		exit 1
+	fi
+	echo "[警告] 跳过代理初始化，将直连签到"
+	exit 0
+fi
 chmod +x "mihomo-linux-amd64-${MIHOMO_VERSION}"
 MIHOMO_BIN="${PROXY_DIR}/mihomo-linux-amd64-${MIHOMO_VERSION}"
 

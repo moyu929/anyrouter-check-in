@@ -173,10 +173,11 @@ class NotificationKit:
 			or self.bark_key
 		)
 
-	def push_message(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text'):
+	def push_message(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text') -> bool:
+		"""推送通知。返回是否实际发送（False 表示未配置任何渠道而跳过）。"""
 		if not self._any_channel_configured():
 			log.notify('未配置任何通知渠道，跳过推送')
-			return
+			return False
 
 		notifications = [
 			('Email', lambda: self.send_email(title, content, msg_type)),
@@ -196,6 +197,7 @@ class NotificationKit:
 				log.notify(f'{name} 推送成功')
 			except Exception as e:
 				log.warn(f'{name} 推送失败: {str(e)}')
+		return True
 
 
 notify = NotificationKit()

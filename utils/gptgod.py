@@ -321,9 +321,10 @@ def gptgod_checkin(
 		log.detail(f'{account_name}: 签到前积分={credits_before}, 已签到={already_checked}')
 
 		user_info_before = _credits_info(credits_before)
+		log.info(f'{account_name}: {user_info_before["display"]}')
 
 		if already_checked:
-			log.success(f'{account_name}: 今日已签到')
+			log.detail(f'{account_name}: 今日已签到')
 			return True, user_info_before, dict(user_info_before)
 
 		# ---- 4. 获取 register-config ----
@@ -374,19 +375,19 @@ def gptgod_checkin(
 			log.failed(f'{account_name}: 签到请求失败: {e}')
 			return False, user_info_before, None
 
-		log.success(f'{account_name}: 签到 API 请求成功')
+		log.detail(f'{account_name}: 签到 API 请求成功')
 
 		# ---- 7. 等待后端落库，再查积分 ----
 		time.sleep(3)
 		info_after = _get_user_info(client)
 		credits_after = _extract_credits(info_after)
-		log.info(f'{account_name}: 签到后积分={credits_after}')
+		log.detail(f'{account_name}: 签到后积分={credits_after}')
 
 		# ---- 8. 校验积分是否真正增加（反爬假成功检测）----
 		if credits_before is not None and credits_after is not None:
 			diff = credits_after - credits_before
 			if diff > 0:
-				log.success(f'{account_name}: 积分增加 {diff}，签到确认成功！')
+				log.detail(f'{account_name}: 积分增加 {diff}，签到确认成功！')
 			elif diff == 0:
 				log.warn(f'{account_name}: 积分未变化（{credits_before}），可能为假成功')
 			else:

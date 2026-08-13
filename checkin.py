@@ -483,19 +483,19 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 		try:
 			result = response.json()
 			if result.get('ret') == 1 or result.get('code') == 0 or result.get('success'):
-				log.success(f'{account_name}: 签到成功!')
+				log.detail(f'{account_name}: 签到 API 返回成功')
 				return True
 			else:
 				error_msg = result.get('msg', result.get('message', 'Unknown error'))
 				already_checked_keywords = ['已经签到', '已签到', '重复签到', 'already checked', 'already signed']
 				if any(keyword in error_msg.lower() for keyword in already_checked_keywords):
-					log.success(f'{account_name}: 今日已签到')
+					log.detail(f'{account_name}: 签到 API 返回"今日已签到"')
 					return True
 				log.failed(f'{account_name}: 签到失败 - {error_msg}')
 				return False
 		except json.JSONDecodeError:
 			if 'success' in response.text.lower():
-				log.success(f'{account_name}: 签到成功!')
+				log.detail(f'{account_name}: 签到 API 返回成功')
 				return True
 			else:
 				log.failed(f'{account_name}: 签到失败 - 响应格式无效')
@@ -571,7 +571,8 @@ async def check_in_account(
 		log.failed(f'{account_name}: 提供商 "{account.provider}" 未在配置中找到')
 		return False, None, None
 
-	log.info(f'{account_name}: 使用提供商 "{account.provider}" ({provider_config.domain})')
+	proxy_mode = '走代理' if (provider_config.use_proxy and not force_direct) else '直连'
+	log.info(f'{account_name}: 使用提供商 "{account.provider}" ({provider_config.domain})，{proxy_mode}')
 
 	# GPTGod 纯 API 签到（无需浏览器，自带登录+签到全流程）
 	if provider_config.auth_method == 'gptgod':
@@ -914,7 +915,7 @@ async def main():
 			need_notify = True
 			log.notify('检测到余额变化，将发送通知')
 		else:
-			log.info('未检测到余额变化')
+			log.detail('未检测到余额变化')
 
 	if balance_changed:
 		for i, account in enumerate(accounts):
@@ -926,6 +927,16 @@ async def main():
 
 	if current_balance_hash:
 		save_balance_hash(current_balance_hash)
+
+	# 签到总结：无论是否发通知都输出，用专门的分隔符标出，便于一眼看清整体结果
+	log.info('==================== [签到总结] ====================')
+	log.stats(f'成功: {success_count}/{total_count}, 失败: {total_count - success_count}/{total_count}')
+	if success_count == total_count:
+		log.success('全部账号签到成功!')
+	elif success_count > 0:
+		log.warn('部分账号签到成功')
+	else:
+		log.failed('全部账号签到失败')
 
 	if need_notify and notification_content:
 		summary = [
@@ -957,10 +968,13 @@ async def main():
 			notify_content += f'\n\n{screenshot_hint}'
 
 		print(notify_content)
-		notify.push_message('AnyRouter Check-in Alert', notify_content, msg_type='text')
-		log.notify('由于失败或余额变化已发送通知')
+		if notify.push_message('AnyRouter Check-in Alert', notify_content, msg_type='text'):
+			log.notify('通知已发送')
+	elif need_notify:
+		log.warn('有失败或余额变化，但缺少通知内容，未发送通知')
 	else:
-		log.info('所有账号成功且无余额变化，跳过通知')
+		log.info('未检测到余额变化，跳过通知')
+	log.info('====================================================')
 
 	sys.exit(0 if success_count > 0 else 1)
 

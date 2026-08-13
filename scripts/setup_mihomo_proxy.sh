@@ -8,6 +8,9 @@
 
 set -euo pipefail
 
+# 记录脚本所在目录（必须在任何 cd 之前解析，否则相对路径会失效）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 if [[ -z "${PROXY_SUBSCRIPTION_URL:-}" ]]; then
 	echo "[信息] 未设置 PROXY_SUBSCRIPTION_URL，跳过代理初始化"
 	exit 0
@@ -104,7 +107,6 @@ if ! curl --retry 3 --retry-delay 5 --retry-all-errors -fsSL -o "${PROXY_DIR}/su
 fi
 
 echo "[信息] 正在转换订阅为 Clash 格式..."
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if ! python3 "${SCRIPT_DIR}/convert_subscribe.py" "${PROXY_DIR}/subscription.raw" > "${PROXY_DIR}/subscription.yaml"; then
 	echo "[失败] 订阅转换失败（无法识别的订阅格式）"
 	if [[ "${PROXY_REQUIRED}" == "true" ]]; then

@@ -28,6 +28,8 @@ def kit(monkeypatch):
 		'TELEGRAM_CHAT_ID',
 		'BARK_KEY',
 		'BARK_SERVER',
+		'NOTIFYX_KEY',
+		'NOTIFYX_TEAM',
 	):
 		monkeypatch.delenv(name, raising=False)
 	return NotificationKit
@@ -99,6 +101,31 @@ class TestBark:
 	def test_missing_key_raises(self, kit):
 		with pytest.raises(ValueError, match='Bark Key not configured'):
 			kit().send_bark('标题', '正文')
+
+
+class TestNotifyX:
+	def test_posts_title_and_content(self, kit, post_spy, monkeypatch):
+		monkeypatch.setenv('NOTIFYX_KEY', 'notifyxkey')
+		client, _ = post_spy
+
+		kit().send_notifyx('标题', '正文')
+
+		url, kwargs = client.post.call_args[0][0], client.post.call_args[1]
+		assert url == 'https://www.notifyx.cn/api/v1/send/notifyxkey'
+		assert kwargs['json'] == {'title': '标题', 'content': '正文'}
+
+	def test_team_included_when_configured(self, kit, post_spy, monkeypatch):
+		monkeypatch.setenv('NOTIFYX_KEY', 'notifyxkey')
+		monkeypatch.setenv('NOTIFYX_TEAM', 'group123')
+		client, _ = post_spy
+
+		kit().send_notifyx('标题', '正文')
+
+		assert client.post.call_args[1]['json']['team'] == 'group123'
+
+	def test_missing_key_raises(self, kit):
+		with pytest.raises(ValueError, match='NotifyX key not configured'):
+			kit().send_notifyx('标题', '正文')
 
 
 class TestServerPush:

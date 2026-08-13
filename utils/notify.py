@@ -28,6 +28,8 @@ class NotificationKit:
 		self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
 		self.bark_key = os.getenv('BARK_KEY')
 		self.bark_server = os.getenv('BARK_SERVER', 'https://api.day.app')
+		self.notifyx_key = os.getenv('NOTIFYX_KEY')
+		self.notifyx_team = os.getenv('NOTIFYX_TEAM', '')
 
 	def _post_json(self, service: str, url: str, data: dict[str, Any]) -> httpx.Response:
 		with httpx.Client(timeout=30.0, trust_env=False) as client:
@@ -159,6 +161,17 @@ class NotificationKit:
 
 		self._post_json('Bark', url, data)
 
+	def send_notifyx(self, title: str, content: str):
+		if not self.notifyx_key:
+			raise ValueError('NotifyX key not configured')
+
+		# NotifyX 多通道推送平台，文档: https://www.notifyx.cn/help
+		data = {'title': title, 'content': content}
+		if self.notifyx_team:
+			data['team'] = self.notifyx_team
+
+		self._post_json('NotifyX', f'https://www.notifyx.cn/api/v1/send/{self.notifyx_key}', data)
+
 	def _any_channel_configured(self) -> bool:
 		"""是否有任一通知渠道完成配置。"""
 		return bool(
@@ -171,6 +184,7 @@ class NotificationKit:
 			or (self.gotify_url and self.gotify_token)
 			or (self.telegram_bot_token and self.telegram_chat_id)
 			or self.bark_key
+			or self.notifyx_key
 		)
 
 	def push_message(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text') -> bool:
@@ -189,12 +203,19 @@ class NotificationKit:
 			('Gotify', lambda: self.send_gotify(title, content)),
 			('Telegram', lambda: self.send_telegram(title, content)),
 			('Bark', lambda: self.send_bark(title, content)),
+			('NotifyX', lambda: self.send_notifyx(title, content)),
 		]
 
 		for name, func in notifications:
 			try:
 				func()
 				log.notify(f'{name} 推送成功')
+			except ValueError as e:
+				# 未配置的渠道静默跳过，不刷"未配置"警告噪音（仅 debug 可见）
+				if 'not configured' in str(e) or 'configuration not set' in str(e):
+					log.detail(f'{name} 未配置，跳过推送')
+				else:
+					log.warn(f'{name} 推送失败: {str(e)}')
 			except Exception as e:
 				log.warn(f'{name} 推送失败: {str(e)}')
 		return True

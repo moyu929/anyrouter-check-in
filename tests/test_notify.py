@@ -27,6 +27,7 @@ def notification_kit(monkeypatch):
 	monkeypatch.setenv('TELEGRAM_BOT_TOKEN', 'telegram_token')
 	monkeypatch.setenv('TELEGRAM_CHAT_ID', 'telegram_chat')
 	monkeypatch.setenv('BARK_KEY', 'bark_key')
+	monkeypatch.setenv('NOTIFYX_KEY', 'notifyx_key')
 	return NotificationKit()
 
 
@@ -107,6 +108,17 @@ def test_send_gotify(mock_httpx_client, notification_kit):
 	mock_client.post.assert_called_once_with(expected_url, json=expected_data)
 
 
+def test_send_notifyx(mock_httpx_client, notification_kit):
+	mock_client, _ = mock_httpx_client
+
+	notification_kit.send_notifyx('测试标题', '测试内容')
+
+	mock_client.post.assert_called_once_with(
+		'https://www.notifyx.cn/api/v1/send/notifyx_key',
+		json={'title': '测试标题', 'content': '测试内容'},
+	)
+
+
 def test_http_response_error(notification_kit):
 	response = httpx.Response(500, text='server error')
 
@@ -136,6 +148,7 @@ def test_missing_config(monkeypatch):
 	monkeypatch.delenv('EMAIL_PASS', raising=False)
 	monkeypatch.delenv('EMAIL_TO', raising=False)
 	monkeypatch.delenv('PUSHPLUS_TOKEN', raising=False)
+	monkeypatch.delenv('NOTIFYX_KEY', raising=False)
 	kit = NotificationKit()
 
 	with pytest.raises(ValueError, match='Email configuration not set'):
@@ -143,6 +156,9 @@ def test_missing_config(monkeypatch):
 
 	with pytest.raises(ValueError, match='PushPlus Token not configured'):
 		kit.send_pushplus('测试', '测试')
+
+	with pytest.raises(ValueError, match='NotifyX key not configured'):
+		kit.send_notifyx('测试', '测试')
 
 
 def test_push_message(notification_kit, monkeypatch):
@@ -156,6 +172,7 @@ def test_push_message(notification_kit, monkeypatch):
 		'send_gotify',
 		'send_telegram',
 		'send_bark',
+		'send_notifyx',
 	]
 	mocks = {}
 	for method_name in send_methods:

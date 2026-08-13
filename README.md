@@ -313,6 +313,7 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
 | **Telegram Bot**   | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Telegram Bot Token 和 Chat ID                                                                           |
 | **Gotify**         | `GOTIFY_URL` + `GOTIFY_TOKEN`             | 自建 Gotify 服务。可选 `GOTIFY_PRIORITY`（自动裁剪到 1-10，默认 9）                                     |
 | **Bark**           | `BARK_KEY`                                | iOS Bark 推送。可选 `BARK_SERVER`（默认 `https://api.day.app`）                                         |
+| **NotifyX**        | `NOTIFYX_KEY`                             | [NotifyX 多通道推送](https://www.notifyx.cn/help)。可选 `NOTIFYX_TEAM`（群组 ID）                        |
 
 > **日志说明**：未配置任何渠道时只打印一行 `[通知] 未配置任何通知渠道，跳过推送`；已配置的渠道发送失败会在日志中打印 `[警告] <渠道> 推送失败: ...`。这是预期输出，不代表签到失败——只要有任一通道配置正确并发送成功（`[通知] <渠道> 推送成功`）即可。
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -105,54 +106,118 @@ class TestParseLine:
 		assert convert_subscribe.parse_line('vmess://%%%not-json%%%') is None
 
 
+class TestParseSubscription:
+	def test_filters_info_nodes(self):
+		content = _b64(
+			'\n'.join(
+				[
+					_vmess_link('剩余流量：272.84 GB'),
+					_vmess_link('套餐到期：长期有效'),
+					_vmess_link('过滤掉15条线路'),
+					_vmess_link('日本-优化'),
+				]
+			)
+		)
+		proxies = convert_subscribe.parse_subscription(content)
+		assert [p['name'] for p in proxies] == ['日本-优化']
+
+	def test_dedup_names(self):
+		content = _b64('\n'.join([_vmess_link('香港-优化'), _vmess_link('香港-优化')]))
+		assert len(convert_subscribe.parse_subscription(content)) == 1
+
+	def test_clash_yaml(self):
+		content = 'proxies:\n  - name: "日本-优化"\n    type: vmess\n    server: 1.2.3.4\n'
+		proxies = convert_subscribe.parse_subscription(content)
+		assert len(proxies) == 1
+		assert proxies[0]['name'] == '日本-优化'
+		assert '_raw' in proxies[0]
+
+
+class TestBuildConfig:
+	def test_structure_and_dynamic_values(self):
+		config = convert_subscribe.build_config(
+			[{'name': '日本-优化', 'type': 'vmess', 'server': '1.2.3.4', 'port': 443}],
+			port=17890,
+			controller_port=19090,
+			secret='sec123',
+		)
+		assert 'mixed-port: 17890' in config
+		assert 'external-controller: 127.0.0.1:19090' in config
+		assert 'secret: "sec123"' in config
+		assert '\nproxies:\n  - name: "日本-优化"' in config
+		assert '"🇯🇵 日本"' in config
+		assert '"AUTO"' in config
+		assert 'rules:\n  - MATCH,AUTO' in config
+
+	def test_region_grouping(self):
+		proxies = [
+			{'name': '日本-优化', 'type': 'vmess', 'server': 'a', 'port': 1},
+			{'name': '新加坡-优化', 'type': 'vmess', 'server': 'b', 'port': 2},
+			{'name': '香港-优化', 'type': 'vmess', 'server': 'c', 'port': 3},
+			{'name': '台湾-优化', 'type': 'vmess', 'server': 'd', 'port': 4},
+		]
+		config = convert_subscribe.build_config(proxies, port=7890, controller_port=9090, secret='')
+		jp = config.split('"🇯🇵 日本"')[1].split('proxy-groups')[0].split('proxies:')[1]
+		assert '日本-优化' in jp and '台湾-优化' not in jp
+		sg = config.split('"🇸🇬 新加坡"')[1].split('proxy-groups')[0].split('proxies:')[1]
+		assert '新加坡-优化' in sg
+		hk = config.split('"🇭🇰 香港"')[1].split('proxy-groups')[0].split('proxies:')[1]
+		assert '香港-优化' in hk
+		# 台湾未匹配任何区域组 → 不进入任何组
+		for region in ('🇯🇵 日本', '🇸🇬 新加坡', '🇭🇰 香港'):
+			block = config.split(f'"{region}"')[1].split('proxy-groups')[0].split('proxies:')[1]
+			assert '台湾-优化' not in block
+
+
 class TestMain:
-	def test_v2rayn_subscription(self, tmp_path, capsys):
+	def test_writes_config(self, tmp_path):
 		sub = tmp_path / 'sub.raw'
-		sub.write_text(_b64('\n'.join([_vmess_link('A'), _vmess_link('B')])), encoding='ascii')
-		code = convert_subscribe.main([str(sub)])
-		out = capsys.readouterr().out
-		assert code == 0
-		assert out.count('  - name:') == 2
-		assert out.startswith('proxies:')
+		sub.write_text(_b64(_vmess_link('日本-优化')), encoding='ascii')
+		out = tmp_path / 'config.yaml'
+		assert convert_subscribe.main([str(sub), str(out)]) == 0
+		content = out.read_text(encoding='utf-8')
+		assert '日本-优化' in content
+		assert 'proxy-groups:' in content
 
-	def test_clash_yaml_passthrough(self, tmp_path, capsys):
-		y = tmp_path / 'sub.yaml'
-		y.write_text('proxies:\n  - name: "x"\n    type: ss\n', encoding='utf-8')
-		code = convert_subscribe.main([str(y)])
-		assert code == 0
-		assert capsys.readouterr().out.startswith('proxies:')
+	def test_bad_args(self):
+		assert convert_subscribe.main([]) == 2
+		assert convert_subscribe.main(['only-one']) == 2
 
-	def test_unparseable_returns_error(self, tmp_path):
+	def test_unparseable(self, tmp_path):
 		bad = tmp_path / 'bad.raw'
 		bad.write_text('not a subscription', encoding='utf-8')
-		assert convert_subscribe.main([str(bad)]) == 1
+		out = tmp_path / 'config.yaml'
+		assert convert_subscribe.main([str(bad), str(out)]) == 1
 
-	def test_missing_file_returns_error(self, tmp_path):
-		assert convert_subscribe.main([str(tmp_path / 'nope')]) == 1
+	def test_missing_file(self, tmp_path):
+		assert convert_subscribe.main([str(tmp_path / 'nope'), str(tmp_path / 'c.yaml')]) == 1
 
-	def test_stdin_input(self, tmp_path, monkeypatch, capsys):
-		raw = _b64(_vmess_link('STDIN节点'))
-		monkeypatch.setattr(sys, 'stdin', _FakeStdin(raw))
-		assert convert_subscribe.main([]) == 0
-		assert 'STDIN节点' in capsys.readouterr().out
-
-
-class _FakeStdin:
-	def __init__(self, text: str):
-		self._text = text
-
-	def read(self) -> str:
-		return self._text
+	def test_env_port_injection(self, tmp_path, monkeypatch):
+		sub = tmp_path / 'sub.raw'
+		sub.write_text(_b64(_vmess_link('日本-优化')), encoding='ascii')
+		out = tmp_path / 'config.yaml'
+		monkeypatch.setenv('PROXY_PORT', '12345')
+		monkeypatch.setenv('MIHOMO_CONTROLLER_PORT', '23456')
+		monkeypatch.setenv('PROXY_SECRET', 'sek')
+		assert convert_subscribe.main([str(sub), str(out)]) == 0
+		content = out.read_text(encoding='utf-8')
+		assert 'mixed-port: 12345' in content
+		assert '127.0.0.1:23456' in content
+		assert 'secret: "sek"' in content
 
 
 class TestSubprocess:
 	def test_cli(self, tmp_path):
 		sub = tmp_path / 'sub.raw'
-		sub.write_text(_b64(_vmess_link('CLI节点')), encoding='ascii')
-		out = subprocess.run(
-			[sys.executable, str(SCRIPTS_DIR / 'convert_subscribe.py'), str(sub)],
+		sub.write_text(_b64(_vmess_link('日本-优化')), encoding='ascii')
+		out_path = tmp_path / 'config.yaml'
+		env = dict(os.environ)
+		env['PROXY_SECRET'] = 'cli-secret'
+		result = subprocess.run(
+			[sys.executable, str(SCRIPTS_DIR / 'convert_subscribe.py'), str(sub), str(out_path)],
 			capture_output=True,
 			text=True,
+			env=env,
 		)
-		assert out.returncode == 0
-		assert 'CLI节点' in out.stdout
+		assert result.returncode == 0
+		assert 'cli-secret' in out_path.read_text(encoding='utf-8')

@@ -93,8 +93,8 @@ fi
 chmod +x "mihomo-linux-amd64-${MIHOMO_VERSION}"
 MIHOMO_BIN="${PROXY_DIR}/mihomo-linux-amd64-${MIHOMO_VERSION}"
 
-# 拉取订阅并转换为 Clash 格式：mihomo 的 proxy-providers 无法直接解析 v2rayN base64 订阅，
-# 必须先转换成含 proxies: 列表的 YAML 再以 file provider 加载。
+# 拉取订阅并直接生成完整 mihomo 配置：mihomo 的 proxy-providers 无法可靠解析 v2rayN base64
+# 订阅且异步加载曾导致节点恒为 0，故把节点直接写入主配置 proxies（同步加载、启动即就绪）。
 echo "[信息] 正在拉取订阅..."
 if ! curl --retry 3 --retry-delay 5 --retry-all-errors -fsSL -o "${PROXY_DIR}/subscription.raw" \
 	"${PROXY_SUBSCRIPTION_URL}"; then
@@ -106,8 +106,11 @@ if ! curl --retry 3 --retry-delay 5 --retry-all-errors -fsSL -o "${PROXY_DIR}/su
 	exit 0
 fi
 
-echo "[信息] 正在转换订阅为 Clash 格式..."
-if ! python3 "${SCRIPT_DIR}/convert_subscribe.py" "${PROXY_DIR}/subscription.raw" > "${PROXY_DIR}/subscription.yaml"; then
+echo "[信息] 正在转换订阅并生成 mihomo 配置..."
+if ! PROXY_PORT="${PROXY_PORT}" \
+	MIHOMO_CONTROLLER_PORT="${CONTROLLER_PORT}" \
+	PROXY_SECRET="${PROXY_SECRET}" \
+	python3 "${SCRIPT_DIR}/convert_subscribe.py" "${PROXY_DIR}/subscription.raw" "${PROXY_DIR}/config.yaml"; then
 	echo "[失败] 订阅转换失败（无法识别的订阅格式）"
 	if [[ "${PROXY_REQUIRED}" == "true" ]]; then
 		exit 1
@@ -115,59 +118,6 @@ if ! python3 "${SCRIPT_DIR}/convert_subscribe.py" "${PROXY_DIR}/subscription.raw
 	echo "[警告] 跳过代理初始化，将直连签到"
 	exit 0
 fi
-
-cat > config.yaml <<EOF
-mixed-port: ${PROXY_PORT}
-allow-lan: false
-ipv6: false
-mode: rule
-log-level: warning
-unified-delay: true
-
-# 开启 REST API，供 Python 节点选择器控制节点切换
-external-controller: 127.0.0.1:${CONTROLLER_PORT}
-secret: "${PROXY_SECRET}"
-
-proxy-providers:
-  subscription:
-    type: file
-    path: ./subscription.yaml
-    health-check:
-      enable: true
-      interval: 300
-      url: https://www.gstatic.com/generate_204
-
-# 按区域分组，节点由 Python 节点选择器手动选择（selector），不再自动测速切换
-proxy-groups:
-  - name: 🇯🇵 日本
-    type: selector
-    use:
-      - subscription
-    filter: "日本|JP|Japan|东京|Tokyo|大阪|Osaka"
-
-  - name: 🇸🇬 新加坡
-    type: selector
-    use:
-      - subscription
-    filter: "新加坡|SG|Singapore"
-
-  - name: 🇭🇰 香港
-    type: selector
-    use:
-      - subscription
-    filter: "香港|HK|Hong Kong|HongKong|HGC"
-
-# 回退链：日本 → 新加坡 → 香港（由 Python 节点选择器按顺序选择）
-  - name: AUTO
-    type: selector
-    proxies:
-      - 🇯🇵 日本
-      - 🇸🇬 新加坡
-      - 🇭🇰 香港
-
-rules:
-  - MATCH,AUTO
-EOF
 
 echo "[信息] 正在保存控制器密钥到 ${PROXY_DIR}/proxy-secret"
 echo "${PROXY_SECRET}" > "${PROXY_DIR}/proxy-secret"
@@ -178,28 +128,28 @@ echo $! > mihomo.pid
 
 PROXY_URL="http://127.0.0.1:${PROXY_PORT}"
 
-# 订阅是异步加载的，启动瞬间代理还没有节点，直接健康检查必然失败；先等待节点加载完成
-echo "[信息] 等待订阅节点加载..."
+# 节点直接写在主配置 proxies 中，mihomo 启动即同步加载；此处仅确认节点已就绪
+echo "[信息] 等待代理节点就绪..."
 NODE_READY=false
 for wait in $(seq 1 60); do
 	NODE_COUNT="$(
 		curl -fsS -H "Authorization: Bearer ${PROXY_SECRET}" \
-			"http://127.0.0.1:${CONTROLLER_PORT}/providers/proxies/subscription" \
+			"http://127.0.0.1:${CONTROLLER_PORT}/proxies" \
 			--max-time 5 2>/dev/null \
-			| python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("all") or d.get("proxies") or []))' 2>/dev/null \
+			| python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("proxies") or {}))' 2>/dev/null \
 			|| echo 0
 	)"
 	if [[ "${NODE_COUNT}" -gt 0 ]]; then
-		echo "[信息] 已加载 ${NODE_COUNT} 个订阅节点"
+		echo "[信息] 已加载 ${NODE_COUNT} 个代理节点/组"
 		NODE_READY=true
 		break
 	fi
-	echo "[信息] 等待订阅节点加载中 (${wait}/60)..."
+	echo "[信息] 等待代理节点就绪中 (${wait}/60)..."
 	sleep 2
 done
 
 if [[ "${NODE_READY}" != "true" ]]; then
-	echo "[失败] 订阅节点加载超时，代理不可用"
+	echo "[失败] 代理节点加载超时，代理不可用"
 	tail -n 30 mihomo.log || true
 	if [[ -f mihomo.pid ]]; then
 		kill "$(cat mihomo.pid)" 2>/dev/null || true

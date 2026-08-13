@@ -123,6 +123,9 @@ class NodeSelector:
 	def _put(self, path: str, body: dict) -> dict:
 		r = self._client.put(f'{self.base}{path}', json=body, headers=self._headers())
 		r.raise_for_status()
+		# mihomo 的 PUT /proxies/{name} 切换节点成功返回 204 No Content（无 body），不能强制解析 JSON
+		if r.status_code == 204 or not r.content:
+			return {}
 		return dict(r.json())
 
 	def group_nodes(self, group: str) -> list[str]:

@@ -39,7 +39,8 @@ class FakeMihomo:
 		if request.method == 'PUT':
 			body = json.loads(request.content or b'{}')
 			self.select_calls.append((path, body))
-			return httpx.Response(200, json={})
+			# 与真实 mihomo 一致：切换节点成功返回 204 No Content（无 body）
+			return httpx.Response(204)
 
 		if path.endswith('/delay'):
 			node = path.split('/proxies/')[1].split('/delay')[0]

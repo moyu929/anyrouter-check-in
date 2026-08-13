@@ -314,7 +314,7 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
 | **Gotify**         | `GOTIFY_URL` + `GOTIFY_TOKEN`             | 自建 Gotify 服务。可选 `GOTIFY_PRIORITY`（自动裁剪到 1-10，默认 9）                                     |
 | **Bark**           | `BARK_KEY`                                | iOS Bark 推送。可选 `BARK_SERVER`（默认 `https://api.day.app`）                                         |
 
-> **日志说明**：未配置的通道会在日志中打印一行 `[渠道]: Message push failed! Reason: ... not configured`。这是预期输出，不代表签到失败——只要有任一通道配置正确并发送成功即可。
+> **日志说明**：未配置任何渠道时只打印一行 `[通知] 未配置任何通知渠道，跳过推送`；已配置的渠道发送失败会在日志中打印 `[警告] <渠道> 推送失败: ...`。这是预期输出，不代表签到失败——只要有任一通道配置正确并发送成功（`[通知] <渠道> 推送成功`）即可。
 
 > **通知触发条件**：仅在「有账号签到失败」或「检测到余额变化」时推送；全部成功且余额无变化时跳过通知。余额指纹保存在 `balance_hash.txt`（CI 中通过缓存跨运行保留），因此首次运行必定推送一次。
 
@@ -393,7 +393,7 @@ uv run pytest tests/ --cov=.
 | WAF 拦截（日志含 `aliyun_waf`） | GitHub Actions IP 被屏蔽     | 配置代理（`PROXY_SUBSCRIPTION_URL`）                                                    |
 | 签到成功但积分未变              | 今日已签到                   | 检查日志 `已签到` 状态                                                                  |
 | 浏览器启动失败                  | CloakBrowser 未安装          | `uv run python -m cloakbrowser install`，或用 `CLOAKBROWSER_BINARY_PATH` 指向本地浏览器 |
-| 日志刷出多条 `not configured`   | 未配置的通知渠道             | 属正常输出，只要有一个渠道成功即可                                                      |
+| 日志出现 `<渠道> 推送失败`       | 个别通知渠道配置错误         | 属正常输出，只要有一个渠道成功（`推送成功`）即可                                        |
 | 每次运行都收到通知              | `balance_hash.txt` 未保留    | CI 依赖缓存保存余额指纹，缓存失效时会被判为首次运行                                     |
 | OAuth 登录失败（401/403）       | GitHub `user_session` 已失效 | 重新从浏览器复制 `user_session` cookie                                                  |
 

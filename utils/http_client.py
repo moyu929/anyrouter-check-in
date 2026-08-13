@@ -157,7 +157,7 @@ def create_client(
 		kwargs['proxy'] = proxy_url
 		node = current_proxy_node()
 		node_info = f'（节点 {node}）' if node else ''
-		log.info(f'HTTP 客户端代理已启用: {redact_proxy_url(proxy_url)}{node_info}')
+		log.detail(f'HTTP 客户端代理已启用: {redact_proxy_url(proxy_url)}{node_info}')
 	client = httpx.Client(**kwargs)
 	base_headers = dict(API_HEADERS)
 	if headers:

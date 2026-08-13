@@ -17,7 +17,7 @@ def _usd(quota: float, used: float) -> dict:
 		'success': True,
 		'quota': quota,
 		'used_quota': used,
-		'display': f':money: Current balance: ${quota}, Used: ${used}',
+		'display': f'💰 Current balance: ${quota}, Used: ${used}',
 	}
 
 

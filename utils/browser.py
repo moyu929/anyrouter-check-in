@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
-from utils.debug import debug_print, is_debug_enabled
+from utils.debug import debug_print, is_debug_enabled, log
 from utils.popups import dismiss_popups, setup_popup_guard
 from utils.proxy import get_playwright_proxy, redact_proxy_url
 
@@ -219,12 +219,9 @@ async def launch_login_context(settings: BrowserLoginSettings, *, use_proxy: boo
 	proxy = get_playwright_proxy(use_proxy=use_proxy)
 	if proxy:
 		launch_kwargs['proxy'] = proxy
-		if is_debug_enabled():
-			print(f'[信息] 浏览器代理已启用: {redact_proxy_url(proxy["server"])}')
-		else:
-			print('[信息] 浏览器代理已启用')
+		log.detail(f'浏览器代理已启用: {redact_proxy_url(proxy["server"])}')
 	elif use_proxy:
-		print('[警告] 该提供商需要代理，但未设置 CHECKIN_PROXY_URL')
+		log.warn('该提供商需要代理，但未设置 CHECKIN_PROXY_URL')
 
 	if settings.persist_profile:
 		from cloakbrowser import launch_persistent_context_async
@@ -278,10 +275,10 @@ async def save_login_screenshot(
 	try:
 		await page.screenshot(path=str(path), full_page=True, timeout=15_000)
 		_pending_notify_screenshots.append(path)
-		print(f'[信息] 已保存截图: {path}')
+		log.detail(f'已保存截图: {path}')
 		return path
 	except Exception as exc:
-		print(f'[警告] 保存截图失败 ({label}): {exc}')
+		log.warn(f'保存截图失败 ({label}): {exc}')
 		return None
 
 
@@ -306,7 +303,7 @@ async def wait_for_site_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS
 		await asyncio.sleep(3)
 	closed = await dismiss_popups(page)
 	if closed:
-		print(f'[信息] 已关闭 {closed} 个弹窗')
+		log.detail(f'已关闭 {closed} 个弹窗')
 
 
 async def _wait_for_optional_load_state(
@@ -350,17 +347,17 @@ async def navigate_login_page(
 	attempt_timeout = min(timeout_ms, 60_000)
 
 	try:
-		print(f'[信息] 登录前正在预热 {base_url}')
+		log.detail(f'登录前正在预热 {base_url}')
 		await page.goto(base_url, wait_until='load', timeout=attempt_timeout)
 		await _settle_page(page, 3, 15_000)
 		closed = await dismiss_popups(page)
 		if closed:
-			print(f'[信息] 预热期间已关闭 {closed} 个弹窗')
+			log.detail(f'预热期间已关闭 {closed} 个弹窗')
 	except Exception as exc:
-		print(f'[警告] 预热导航失败: {exc}')
+		log.warn(f'预热导航失败: {exc}')
 
 	for attempt in range(3):
-		print(f'[信息] 正在导航到登录页 (第 {attempt + 1}/3 次): {login_url}')
+		log.detail(f'正在导航到登录页 (第 {attempt + 1}/3 次): {login_url}')
 		await page.goto(login_url, wait_until='load', timeout=attempt_timeout)
 		await _settle_page(page, 5, 20_000)
 
@@ -369,7 +366,7 @@ async def navigate_login_page(
 			if await page.evaluate(_LOGIN_SHELL_READY_JS):
 				return
 
-		print(f'[警告] 第 {attempt + 1} 次登录页框架未就绪')
+		log.warn(f'第 {attempt + 1} 次登录页框架未就绪')
 		await _log_login_page_state(page)
 		if provider and account_name:
 			await save_login_screenshot(page, provider, account_name, f'login-shell-attempt-{attempt + 1}')
@@ -451,7 +448,7 @@ async def verify_browser_login(page: Page, console_url: str, timeout_ms: int) ->
 
 	page.on('response', on_response)
 	try:
-		print(f'[信息] 通过 {console_url} 和 {USER_SELF_API_SUFFIX} 验证登录')
+		log.detail(f'通过 {console_url} 和 {USER_SELF_API_SUFFIX} 验证登录')
 		await page.goto(console_url, wait_until='load', timeout=min(timeout_ms, 60_000))
 		try:
 			await page.wait_for_load_state('networkidle', timeout=20_000)
@@ -470,16 +467,16 @@ async def verify_browser_login(page: Page, console_url: str, timeout_ms: int) ->
 		if is_debug_enabled():
 			user_id = captured_profile.get('id')
 			username = captured_profile.get('username', '')
-			print(f'[信息] 已通过 {USER_SELF_API_SUFFIX} 验证登录: id={user_id}, username={username}')
+			log.detail(f'已通过 {USER_SELF_API_SUFFIX} 验证登录: id={user_id}, username={username}')
 		else:
-			print('[信息] 登录验证通过')
+			log.detail('登录验证通过')
 		return captured_profile
 
 	if CONSOLE_PATH in page.url.lower():
-		print(f'[警告] 已到达 {CONSOLE_PATH}，但 {USER_SELF_API_SUFFIX} 未返回用户信息')
+		log.warn(f'已到达 {CONSOLE_PATH}，但 {USER_SELF_API_SUFFIX} 未返回用户信息')
 	else:
 		debug_print(f'[警告] 登录验证失败: 当前 URL={page.url}')
-		print('[警告] 登录验证失败')
+		log.warn('登录验证失败')
 	return None
 
 

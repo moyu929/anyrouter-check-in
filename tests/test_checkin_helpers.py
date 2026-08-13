@@ -145,7 +145,7 @@ class TestGetUserInfo:
 			'success': True,
 			'quota': 100.0,
 			'used_quota': 25.0,
-			'display': ':money: 当前余额: $100.0, 已用: $25.0',
+			'display': '💰 当前余额: $100.0, 已用: $25.0',
 		}
 
 	def test_missing_quota_fields_default_to_zero(self):

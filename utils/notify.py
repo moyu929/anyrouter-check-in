@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 import httpx
 
+from utils.debug import log
+
 
 class NotificationKit:
 	def __init__(self):
@@ -157,7 +159,25 @@ class NotificationKit:
 
 		self._post_json('Bark', url, data)
 
+	def _any_channel_configured(self) -> bool:
+		"""是否有任一通知渠道完成配置。"""
+		return bool(
+			(self.email_user and self.email_pass and self.email_to)
+			or self.pushplus_token
+			or self.server_push_key
+			or self.dingding_webhook
+			or self.feishu_webhook
+			or self.weixin_webhook
+			or (self.gotify_url and self.gotify_token)
+			or (self.telegram_bot_token and self.telegram_chat_id)
+			or self.bark_key
+		)
+
 	def push_message(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text'):
+		if not self._any_channel_configured():
+			log.notify('未配置任何通知渠道，跳过推送')
+			return
+
 		notifications = [
 			('Email', lambda: self.send_email(title, content, msg_type)),
 			('PushPlus', lambda: self.send_pushplus(title, content)),
@@ -173,9 +193,9 @@ class NotificationKit:
 		for name, func in notifications:
 			try:
 				func()
-				print(f'[{name}]: Message push successful!')
+				log.notify(f'{name} 推送成功')
 			except Exception as e:
-				print(f'[{name}]: Message push failed! Reason: {str(e)}')
+				log.warn(f'{name} 推送失败: {str(e)}')
 
 
 notify = NotificationKit()

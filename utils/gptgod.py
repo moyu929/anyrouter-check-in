@@ -252,7 +252,7 @@ def _credits_info(credits_value: int | None) -> dict:
 		'quota': amount,
 		'used_quota': 0,
 		'unit': 'credits',
-		'display': f':money: Current tokens: {amount}',
+		'display': f'💰 当前积分: {amount}',
 	}
 
 
@@ -311,14 +311,14 @@ def gptgod_checkin(
 			log.failed(f'{account_name}: 登录请求失败: {e}')
 			return False, _login_failed_info(), None
 
-		log.info(f'{account_name}: 登录成功')
+		log.detail(f'{account_name}: 登录成功')
 
 		# ---- 3. 登录后查用户信息（含签到状态 + 积分）----
 		info_before = _get_user_info(client)
 		credits_before = _extract_credits(info_before)
 		already_checked = bool(info_before.get('checkin')) if info_before else False
 
-		log.info(f'{account_name}: 签到前积分={credits_before}, 已签到={already_checked}')
+		log.detail(f'{account_name}: 签到前积分={credits_before}, 已签到={already_checked}')
 
 		user_info_before = _credits_info(credits_before)
 

@@ -124,7 +124,7 @@ class TestGptgodCheckinFlow:
 			'quota': 100,
 			'used_quota': 0,
 			'unit': 'credits',
-			'display': ':money: Current tokens: 100',
+			'display': '💰 当前积分: 100',
 		}
 		assert after is not None and after['quota'] == 130
 		assert '/api/user/checkin' in scenario.paths

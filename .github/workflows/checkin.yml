@@ -40,14 +40,28 @@ jobs:
 
     - name: 安装依赖
       run: |
-        uv sync --frozen
+        if [ "${DEBUG_MODE}" = "true" ]; then
+          uv sync --frozen
+        else
+          uv sync --frozen -q
+        fi
         echo "✅ 环境初始化完成"
 
     - name: 安装系统依赖
       run: |
-        sudo apt-get update
-        sudo apt-get install -y xvfb fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
-          fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf
+        PKGS="xvfb fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf"
+        if [ "${DEBUG_MODE}" = "true" ]; then
+          sudo apt-get update
+          sudo apt-get install -y ${PKGS}
+        else
+          sudo apt-get update -qq >/dev/null
+          sudo apt-get install -y -qq ${PKGS} >/dev/null 2>&1 || {
+            echo "系统依赖安装失败，重新执行以查看详细错误："
+            sudo apt-get install -y ${PKGS} 2>&1 | tail -60
+            exit 1
+          }
+        fi
+        echo "✅ 系统字体安装完成"
 
     - name: 缓存 CloakBrowser 二进制
       uses: actions/cache@v5
@@ -60,8 +74,15 @@ jobs:
 
     - name: 安装 CloakBrowser
       run: |
-        uv run python -m cloakbrowser install
-        echo "✅ CloakBrowser 安装完成"
+        if [ "${DEBUG_MODE}" = "true" ]; then
+          uv run python -m cloakbrowser install
+        else
+          uv run python -m cloakbrowser install >/tmp/cloakbrowser-install.log 2>&1 && echo "✅ CloakBrowser 安装完成" || {
+            echo "CloakBrowser 安装失败："
+            tail -40 /tmp/cloakbrowser-install.log
+            exit 1
+          }
+        fi
 
     - name: 恢复余额历史缓存
       uses: actions/cache@v5
@@ -125,6 +146,8 @@ jobs:
     - name: 执行签到
       env:
         DEBUG_MODE: ${{ env.DEBUG_MODE }}
+        # 关闭 cloakbrowser 后台"更新可用"线程提示，避免打断签到流程日志
+        CLOAKBROWSER_AUTO_UPDATE: false
         CHECKIN_HEADLESS: false
         CHECKIN_HUMANIZE: true
         CHECKIN_WAIT_TIMEOUT_MS: 120000

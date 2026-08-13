@@ -136,7 +136,7 @@ async def get_waf_cookies_with_browser(
 	use_proxy: bool = False,
 ):
 	"""使用浏览器获取 WAF cookies。"""
-	log.info(f'{account_name}: 启动浏览器获取 WAF cookies...')
+	log.detail(f'{account_name}: 启动浏览器获取 WAF cookies...')
 
 	launch_kwargs: dict = {'headless': True}
 	proxy = get_playwright_proxy(use_proxy=use_proxy)
@@ -147,7 +147,7 @@ async def get_waf_cookies_with_browser(
 		browser = await launch_async(**launch_kwargs)
 		page = await browser.new_page()
 		await prepare_browser_page(page)
-		log.info(f'{account_name}: 访问登录页面获取初始 cookies...')
+		log.detail(f'{account_name}: 访问登录页面获取初始 cookies...')
 
 		await page.goto(login_url, wait_until='domcontentloaded')
 		await wait_for_waf_ready(page)
@@ -159,13 +159,13 @@ async def get_waf_cookies_with_browser(
 			if cookie.get('name') in required_cookies and cookie.get('value') is not None
 		}
 
-		log.info(f'{account_name}: 获取到 {len(waf_cookies)} 个 WAF cookies')
+		log.detail(f'{account_name}: 获取到 {len(waf_cookies)} 个 WAF cookies')
 		missing_cookies = [name for name in required_cookies if name not in waf_cookies]
 		if missing_cookies:
 			log.failed(f'{account_name}: 缺少 WAF cookies: {missing_cookies}')
 			return None
 
-		log.success(f'{account_name}: 成功获取所有 WAF cookies')
+		log.detail(f'{account_name}: 成功获取所有 WAF cookies')
 		return waf_cookies
 	except Exception as e:
 		log.failed(f'{account_name}: 获取 WAF cookies 时出错: {e}')
@@ -183,7 +183,7 @@ async def login_with_credentials(
 	password: str,
 ) -> BrowserLoginResult | None:
 	"""使用邮箱密码通过浏览器登录，返回 cookies 与拦截到的 api user id。"""
-	log.info(f'{account_name}: 正在使用邮箱密码登录...')
+	log.detail(f'{account_name}: 正在使用邮箱密码登录...')
 
 	login_url = f'{provider_config.domain}{provider_config.login_path}'
 	settings = load_browser_login_settings(
@@ -199,7 +199,7 @@ async def login_with_credentials(
 		f'人性化={settings.humanize}, 超时={timeout_ms}ms'
 	)
 
-	log.info(f'{account_name}: 提供商代理={"已启用" if provider_config.use_proxy else "已禁用"} ({provider_name})')
+	log.detail(f'{account_name}: 提供商代理={"已启用" if provider_config.use_proxy else "已禁用"} ({provider_name})')
 
 	context = None
 	page = None
@@ -228,7 +228,7 @@ async def login_with_credentials(
 				account_name=account_name,
 			)
 		else:
-			log.info(f'{account_name}: 浏览器配置文件已登录')
+			log.detail(f'{account_name}: 浏览器配置文件已登录')
 
 		console_url = f'{provider_config.domain}/console'
 		user_profile = await verify_browser_login(page, console_url, timeout_ms)
@@ -277,7 +277,7 @@ async def login_with_github_oauth(
 	参数:
 	  force_direct: 强制直连（忽略代理）。用于节点耗尽后的兜底重试。
 	"""
-	log.info(f'{account_name}: 正在使用 GitHub OAuth 登录...')
+	log.detail(f'{account_name}: 正在使用 GitHub OAuth 登录...')
 
 	domain = provider_config.domain
 	use_proxy = provider_config.use_proxy and not force_direct
@@ -328,7 +328,7 @@ async def login_with_github_oauth(
 			log.failed(f'{account_name}: OAuth 状态为空')
 			return None
 
-		log.info(f'{account_name}: 获取到 OAuth 状态（cookies: {list(client.cookies.keys())}）')
+		log.detail(f'{account_name}: 获取到 OAuth 状态（cookies: {list(client.cookies.keys())}）')
 
 		# Step 2: 用 GitHub user_session 获取授权 code
 		log.debug(f'{account_name}: 第2步 - 获取 GitHub OAuth code...')
@@ -367,7 +367,7 @@ async def login_with_github_oauth(
 			return None
 
 		code = code_match.group(1)
-		log.info(f'{account_name}: 获取到 GitHub OAuth code')
+		log.detail(f'{account_name}: 获取到 GitHub OAuth code')
 
 		# Step 3: OAuth 回调，触发登录+签到
 		log.debug(f'{account_name}: 第3步 - OAuth 回调...')
@@ -402,7 +402,7 @@ async def login_with_github_oauth(
 		user_data = cb_data.get('data', {})
 		api_user = str(user_data.get('id')) if user_data.get('id') is not None else None
 		checked_in = user_data.get('checked_in', False)
-		log.info(f'{account_name}: 登录成功，已签到状态={checked_in}')
+		log.detail(f'{account_name}: 登录成功，已签到状态={checked_in}')
 
 		all_cookies = _cookies_for_domain(client, domain)
 		log.success(f'{account_name}: OAuth 登录成功，获取到 {len(all_cookies)} 个 cookies')
@@ -429,7 +429,7 @@ def get_user_info(client, headers, user_info_url: str, *, propagate_network_erro
 					'success': True,
 					'quota': quota,
 					'used_quota': used_quota,
-					'display': f':money: 当前余额: ${quota}, 已用: ${used_quota}',
+					'display': f'💰 当前余额: ${quota}, 已用: ${used_quota}',
 				}
 		return {'success': False, 'error': f'获取用户信息失败: HTTP {response.status_code}'}
 	except _NETWORK_ERRORS as e:
@@ -462,7 +462,7 @@ async def prepare_cookies(account_name: str, provider_config, user_cookies: dict
 			log.failed(f'{account_name}: 无法获取 WAF cookies')
 			return None
 	else:
-		log.info(f'{account_name}: 无需绕过 WAF，直接使用用户 cookies')
+		log.detail(f'{account_name}: 无需绕过 WAF，直接使用用户 cookies')
 
 	return {**user_cookies, **waf_cookies}
 
@@ -565,7 +565,6 @@ async def check_in_account(
 	  force_direct: 强制直连（忽略代理）。用于节点耗尽后的兜底重试。
 	"""
 	account_name = account.get_display_name(account_index)
-	log.info(f'\n{account_name}: 开始处理')
 
 	provider_config = app_config.get_provider(account.provider)
 	if not provider_config:
@@ -594,7 +593,7 @@ async def check_in_account(
 	resolved_api_user: str | None = None
 	auth_method = None
 	if provider_config.is_oauth() and account.has_oauth_credentials():
-		log.info(f'{account_name}: 正在尝试 OAuth 登录 (github_session)...')
+		log.detail(f'{account_name}: 正在尝试 OAuth 登录 (github_session)...')
 		assert account.github_session is not None
 		login_result = await login_with_github_oauth(
 			account_name,
@@ -610,7 +609,7 @@ async def check_in_account(
 			log.failed(f'{account_name}: OAuth 登录失败')
 			return False, None, None
 	elif account.has_login_credentials():
-		log.info(f'{account_name}: 正在尝试邮箱密码登录 (优先)...')
+		log.detail(f'{account_name}: 正在尝试邮箱密码登录 (优先)...')
 		assert account.email is not None and account.password is not None
 		login_result = await login_with_credentials(
 			account_name,
@@ -637,7 +636,7 @@ async def check_in_account(
 	if not all_cookies:
 		return False, None, None
 
-	log.info(f'{account_name}: 使用认证方式 -> {auth_method}')
+	log.detail(f'{account_name}: 使用认证方式 -> {auth_method}')
 
 	return run_check_in_requests(
 		all_cookies,
@@ -702,7 +701,7 @@ def run_check_in_requests(
 
 			user_info_after = get_user_info(client, headers, user_info_url)
 			if user_info_after and user_info_after.get('success'):
-				log.info(f'{account_name}: 签到自动完成（由用户信息请求触发）')
+				log.detail(f'{account_name}: 签到自动完成（由用户信息请求触发）')
 				return True, user_info_before, user_info_after
 			error = user_info_after.get('error', 'Unknown error') if user_info_after else 'Unknown error'
 			log.failed(f'{account_name}: 自动签到失败 - {error}')
@@ -776,13 +775,13 @@ async def main():
 		else:
 			log.info('未设置 CHECKIN_PROXY_URL；use_proxy=true 的提供商将在无代理下运行')
 	else:
-		log.info('调试模式未开启（设置 DEBUG_MODE=true 启用截图和详细日志）')
+		log.detail('调试模式未开启（设置 DEBUG_MODE=true 启用截图和详细日志）')
 
 	log.info('AnyRouter.top 多账号自动签到脚本启动')
 	log.info(f'执行时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
 
 	app_config = AppConfig.load_from_env()
-	log.info(f'加载了 {len(app_config.providers)} 个提供商配置')
+	log.detail(f'加载了 {len(app_config.providers)} 个提供商配置')
 	if is_debug_enabled():
 		for provider_name, provider in sorted(app_config.providers.items()):
 			log.info(f'提供商 "{provider_name}": use_proxy={provider.use_proxy}')
@@ -809,7 +808,7 @@ async def main():
 			else:
 				log.warn('存在使用代理的账号，但未设置 CHECKIN_PROXY_URL')
 	else:
-		log.info('所有账号均不使用代理，跳过代理节点选择')
+		log.detail('所有账号均不使用代理，跳过代理节点选择')
 
 	last_balance_hash = load_balance_hash()
 
@@ -824,6 +823,8 @@ async def main():
 
 	for i, account in enumerate(accounts):
 		account_key = f'account_{i + 1}'
+		account_name = account.get_display_name(i)
+		log.info(f'=============== [{i + 1}/{total_count}] {account_name} 开始 ===============')
 		try:
 			success, user_info_before, user_info_after = await check_in_account_with_retry(
 				account, i, app_config, node_selector
@@ -869,6 +870,20 @@ async def main():
 						'balance_change': balance_change,
 						'success': success,
 					}
+
+					# 实时输出该账号签到结果明细（统一各路径日志，避免只体现在最终通知里）
+					unit = user_info_after.get('unit', 'usd')
+					if success and check_in_reward != 0:
+						log.success(
+							f'{account_name}: 签到获得 {_format_amount(check_in_reward, unit)}'
+							f'（余额 {_format_amount(before_quota, unit)} → {_format_amount(after_quota, unit)}）'
+						)
+					elif success and usage_increase != 0:
+						log.success(f'{account_name}: 今日已签到，期间消耗 {_format_amount(usage_increase, unit)}')
+					elif success:
+						log.success(f'{account_name}: 今日已签到，余额无变化')
+					else:
+						log.warn(f'{account_name}: 签到失败，当前余额 {_format_amount(after_quota, unit)}')
 
 			if should_notify_this_account:
 				account_name = account.get_display_name(i)

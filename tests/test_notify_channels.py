@@ -205,15 +205,16 @@ class TestEmailDefaults:
 
 class TestPushMessageResilience:
 	def test_unconfigured_channels_do_not_raise(self, kit, capsys):
-		"""所有渠道均未配置时 push_message 不抛异常，仅逐条打印失败原因。"""
+		"""所有渠道均未配置时只打印一条提示，不逐渠道刷失败。"""
 		kit().push_message('标题', '正文')
 
 		out = capsys.readouterr().out
-		assert 'Message push failed' in out
-		assert 'not configured' in out or 'not set' in out
+		assert '未配置任何通知渠道，跳过推送' in out
+		assert '推送失败' not in out
 
 	def test_one_failing_channel_does_not_block_others(self, kit, monkeypatch, capsys):
 		instance = kit()
+		instance.bark_key = 'bark-key'  # 配置一个渠道，避免 push_message 因无渠道早退
 		monkeypatch.setattr(instance, 'send_email', MagicMock(side_effect=RuntimeError('smtp down')))
 		bark = MagicMock()
 		monkeypatch.setattr(instance, 'send_bark', bark)
@@ -222,5 +223,5 @@ class TestPushMessageResilience:
 
 		assert bark.called
 		out = capsys.readouterr().out
-		assert '[Email]: Message push failed! Reason: smtp down' in out
-		assert '[Bark]: Message push successful!' in out
+		assert 'Email 推送失败: smtp down' in out
+		assert 'Bark 推送成功' in out

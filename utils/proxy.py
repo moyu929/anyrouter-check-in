@@ -87,7 +87,7 @@ def get_proxy_server(*, use_proxy: bool = True) -> str | None:
 		if working:
 			node = current_proxy_node()
 			node_info = f'（节点 {node}）' if node else ''
-			log.info(f'代理连通性正常: {redacted_server}{node_info}')
+			log.detail(f'代理连通性正常: {redacted_server}{node_info}')
 		else:
 			log.warn(f'代理 {redacted_server} 不可达（测试地址: {get_proxy_test_url()}），回退到直连')
 

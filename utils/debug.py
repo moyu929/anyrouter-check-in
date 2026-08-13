@@ -48,6 +48,16 @@ class _Log:
 			print(f'[调试] {msg}')
 
 	@staticmethod
+	def detail(msg: str) -> None:
+		"""详细流程日志（登录/浏览器/代理内部步骤），仅在调试模式下输出。
+
+		与 debug 等价，但语义上代表"面向开发者的流程细节"，
+		普通用户模式下不显示，避免日志繁杂难懂。
+		"""
+		if _is_debug():
+			print(f'[调试] {msg}')
+
+	@staticmethod
 	def notify(msg: str) -> None:
 		"""通知相关日志（始终输出）。"""
 		print(f'[通知] {msg}')

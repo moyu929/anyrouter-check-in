@@ -209,7 +209,7 @@ class NodeSelector:
 
 			ordered = sorted(delays, key=lambda node: delays[node])
 			for node in ordered:
-				log.info(f'节点选择: 候选 {region} -> {node}（延迟 {delays[node]}ms）')
+				log.detail(f'节点选择: 候选 {region} -> {node}（延迟 {delays[node]}ms）')
 				try:
 					self.select(region, node)  # 区域 selector 切到该节点
 					self.select(AUTO_GROUP, region)  # AUTO 切到该区域

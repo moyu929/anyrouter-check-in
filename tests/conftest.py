@@ -36,13 +36,15 @@ NETWORK_ENV_VARS = (
 	'TELEGRAM_BOT_TOKEN',
 	'TELEGRAM_CHAT_ID',
 	'BARK_KEY',
+	'DEBUG_MODE',
 )
 
 for env_name in NETWORK_ENV_VARS:
 	os.environ.pop(env_name, None)
 
-# 防止 checkin.py 在测试收集阶段通过 load_dotenv() 重新注入本地真实凭据。
-os.environ['PYTHON_DOTENV_DISABLED'] = '1'
+# 注意：python-dotenv 并不识别 PYTHON_DOTENV_DISABLED，checkin.py 导入时 load_dotenv()
+# 仍可能注入本地 .env 变量；真正起隔离作用的是下面的 clean_network_environment
+# autouse fixture（每个用例前删除上述变量，含 DEBUG_MODE，保证测试不依赖本地 .env）。
 
 
 def pytest_addoption(parser):

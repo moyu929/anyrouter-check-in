@@ -252,3 +252,18 @@ class TestPushMessageResilience:
 		out = capsys.readouterr().out
 		assert 'Email 推送失败: smtp down' in out
 		assert 'Bark 推送成功' in out
+
+	def test_unconfigured_channels_are_skipped_silently(self, kit, monkeypatch, capsys):
+		"""仅配置一个渠道时，其余未配置渠道不刷警告噪音。"""
+		instance = kit()
+		instance.notifyx_key = 'notifyx-key'
+		notifyx = MagicMock()
+		monkeypatch.setattr(instance, 'send_notifyx', notifyx)
+
+		instance.push_message('标题', '正文')
+
+		assert notifyx.called
+		out = capsys.readouterr().out
+		assert 'NotifyX 推送成功' in out
+		assert '推送失败' not in out
+		assert '未配置' not in out

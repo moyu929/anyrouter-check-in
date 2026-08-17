@@ -790,7 +790,7 @@ async def main():
 	accounts = load_accounts_config()
 	if not accounts:
 		log.failed('无法加载账号配置，程序退出')
-		notify.push_message('AnyRouter Check-in Alert', '无法加载账号配置，程序退出', msg_type='text')
+		notify.push_message('签到程序错误', '无法加载账号配置，程序退出', msg_type='text')
 		sys.exit(1)
 
 	log.info(f'发现 {len(accounts)} 个账号配置')
@@ -968,7 +968,8 @@ async def main():
 			notify_content += f'\n\n{screenshot_hint}'
 
 		print(notify_content)
-		if notify.push_message('AnyRouter Check-in Alert', notify_content, msg_type='text'):
+		notify_title = f'每日签到完成，成功 {success_count}，失败 {total_count - success_count}'
+		if notify.push_message(notify_title, notify_content, msg_type='text'):
 			log.notify('通知已发送')
 	elif need_notify:
 		log.warn('有失败或余额变化，但缺少通知内容，未发送通知')

@@ -31,6 +31,20 @@ def test_provider_profile_persistence_can_override_builtin(monkeypatch):
 	assert config.providers['agentrouter'].persist_profile is True
 
 
+def test_builtin_gorouter_uses_autocheckin_and_oauth(monkeypatch):
+	"""gorouter 与 agentrouter 同构：OAuth 登录 + 登录时自动签到（sign_in_path=None）。"""
+	monkeypatch.delenv('PROVIDERS', raising=False)
+
+	config = AppConfig.load_from_env()
+
+	gorouter = config.providers['gorouter']
+	assert gorouter.domain == 'https://gorouter.app'
+	assert gorouter.sign_in_path is None  # 自动签到，绕过 Turnstile 手动签到接口
+	assert gorouter.needs_manual_check_in() is False
+	assert gorouter.is_oauth() is True
+	assert gorouter.oauth_client_id == 'Ov23lipc1Ups6bRqeQYE'
+
+
 def test_custom_provider_profile_persistence_defaults_to_false(monkeypatch):
 	monkeypatch.setenv('PROVIDERS', json.dumps({'custom': {'domain': 'https://custom.example.com'}}))
 

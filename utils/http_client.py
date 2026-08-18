@@ -30,7 +30,9 @@ API_HEADERS = {
 	'User-Agent': DEFAULT_UA,
 	'Accept': 'application/json, text/plain, */*',
 	'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-	'Accept-Encoding': 'gzip, deflate, br, zstd',
+	# 仅声明 gzip/deflate：当前环境未安装 brotli/zstd 解码器，httpx 无法自动
+	# 解压 br/zstd 响应（gorouter 等站点会因 Accept-Encoding 协商返回 zstd 导致 JSON 解析失败）。
+	'Accept-Encoding': 'gzip, deflate',
 	'Content-Type': 'application/json',
 	'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
 	'sec-ch-ua-mobile': '?0',

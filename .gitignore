@@ -9,6 +9,7 @@ __pycache__
 coverage.xml
 htmlcov
 balance_hash.txt
+balance_snapshot.json
 .browser_profiles
 checkin_screenshots
 .device_fp

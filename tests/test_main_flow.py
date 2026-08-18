@@ -1,5 +1,6 @@
 """main() 汇总与通知去重测试（完全 mock 掉签到调用，绝不发起真实请求）。"""
 
+import json
 import sys
 from pathlib import Path
 
@@ -37,6 +38,7 @@ class _NotifySpy:
 def harness(monkeypatch, tmp_path):
 	"""隔离余额哈希文件、拦截通知，并用假 check_in_account 替换真实签到。"""
 	monkeypatch.setattr(checkin_module, 'BALANCE_HASH_FILE', str(tmp_path / 'balance_hash.txt'))
+	monkeypatch.setattr(checkin_module, 'BALANCE_SNAPSHOT_FILE', str(tmp_path / 'balance_snapshot.json'))
 	monkeypatch.setattr(checkin_module, 'take_pending_screenshots', lambda: [])
 	spy = _NotifySpy()
 	monkeypatch.setattr(checkin_module.notify, 'push_message', spy.push_message)
@@ -53,10 +55,10 @@ def harness(monkeypatch, tmp_path):
 	return setup
 
 
-def _account(name: str):
+def _account(name: str, provider: str = 'anyrouter'):
 	from utils.config import AccountConfig
 
-	return AccountConfig(cookies={'session': 'abc'}, api_user='1', name=name)
+	return AccountConfig(cookies={'session': 'abc'}, api_user='1', name=name, provider=provider)
 
 
 class TestBalanceHashPersistence:
@@ -223,6 +225,7 @@ class TestMainProxyInit:
 	@staticmethod
 	def _base(monkeypatch, tmp_path, *, node_result: str | None = 'node-jp'):
 		monkeypatch.setattr(checkin_module, 'BALANCE_HASH_FILE', str(tmp_path / 'bh.txt'))
+		monkeypatch.setattr(checkin_module, 'BALANCE_SNAPSHOT_FILE', str(tmp_path / 'bss.json'))
 		monkeypatch.setattr(checkin_module, 'load_accounts_config', lambda: [_account('主号')])
 		fake_selector = _FakeSelector(node_result=node_result)
 		monkeypatch.setattr(checkin_module, 'NodeSelector', lambda: fake_selector)
@@ -312,6 +315,7 @@ class TestMainProxyInitScreenshots:
 	@staticmethod
 	def _setup(monkeypatch, tmp_path):
 		monkeypatch.setattr(checkin_module, 'BALANCE_HASH_FILE', str(tmp_path / 'bh.txt'))
+		monkeypatch.setattr(checkin_module, 'BALANCE_SNAPSHOT_FILE', str(tmp_path / 'bss.json'))
 		monkeypatch.setattr(checkin_module, 'load_accounts_config', lambda: [_account('主号')])
 
 		async def fake_retry(account, index, app_config, node_selector):
@@ -353,3 +357,34 @@ class TestMainProxyInitScreenshots:
 
 		assert code == 1
 		assert '保存到 `checkin_screenshots/` 目录' in spy.body
+
+
+class TestAutoCheckinCrossDay:
+	"""自动签到账号（agentrouter/gorouter）用跨日快照还原当日签到奖励。"""
+
+	async def test_cross_day_reward_from_snapshot(self, harness, tmp_path):
+		"""昨日快照总额 < 今日总额 → 结果与通知体现 '签到获得 +X'（跨日估算）。"""
+		(tmp_path / 'balance_snapshot.json').write_text(json.dumps({'主号': 100.0}), encoding='utf-8')
+		# 自动签到特征：before == after（单次对比无增量），但跨日应算出 +25
+		spy = harness(
+			[_account('主号', 'agentrouter')],
+			[(True, _usd(125.0, 0.0), _usd(125.0, 0.0))],
+		)
+
+		with pytest.raises(SystemExit):
+			await main()
+
+		assert '签到获得: +$25.00' in spy.body
+
+	async def test_no_snapshot_falls_back_to_no_change(self, harness):
+		"""无昨日快照（首次运行）时不估算奖励，仍显示'余额无变化'。"""
+		spy = harness(
+			[_account('主号', 'agentrouter')],
+			[(True, _usd(125.0, 0.0), _usd(125.0, 0.0))],
+		)
+
+		with pytest.raises(SystemExit):
+			await main()
+
+		assert '签到获得' not in spy.body
+		assert '今日已签到，无变化' in spy.body

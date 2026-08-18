@@ -87,7 +87,9 @@ jobs:
     - name: 恢复余额历史缓存
       uses: actions/cache@v5
       with:
-        path: balance_hash.txt
+        path: |
+          balance_hash.txt
+          balance_snapshot.json
         key: balance-hash-${{ github.ref_name }}-${{ github.run_id }}
         restore-keys: |
           balance-hash-${{ github.ref_name }}-

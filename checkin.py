@@ -49,6 +49,7 @@ from utils.proxy import get_playwright_proxy, is_proxy_configured, needs_proxy, 
 from utils.proxy_selector import NodeSelector, available, current_proxy_node, no_available_node
 
 BALANCE_HASH_FILE = 'balance_hash.txt'
+BALANCE_SNAPSHOT_FILE = 'balance_snapshot.json'
 
 # 网络层异常（代理节点问题），用于触发"切换节点重试"
 _NETWORK_ERRORS = (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError)
@@ -90,6 +91,32 @@ def save_balance_hash(balance_hash):
 			f.write(balance_hash)
 	except Exception as e:
 		log.warn(f'警告: 保存余额哈希失败: {e}')
+
+
+def load_balance_snapshot() -> dict[str, float]:
+	"""加载跨日总额快照 {账号名: 签到后总额}。
+
+	用于还原"登录即自动签到"类账号（agentrouter/gorouter）的当日签到奖励：
+	单次运行拿到的余额已是签到后，无法像手动签到那样前后对比，故用昨日总额快照跨日估算。
+	"""
+	try:
+		if os.path.exists(BALANCE_SNAPSHOT_FILE):
+			with open(BALANCE_SNAPSHOT_FILE, 'r', encoding='utf-8') as f:
+				data = json.load(f)
+			if isinstance(data, dict):
+				return {k: float(v) for k, v in data.items() if isinstance(v, (int, float))}
+	except Exception:  # nosec B110
+		pass
+	return {}
+
+
+def save_balance_snapshot(snapshot: dict[str, float]) -> None:
+	"""保存跨日总额快照。"""
+	try:
+		with open(BALANCE_SNAPSHOT_FILE, 'w', encoding='utf-8') as f:
+			json.dump(snapshot, f, ensure_ascii=False, sort_keys=True)
+	except Exception as e:
+		log.warn(f'保存余额快照失败: {e}')
 
 
 def generate_balance_hash(balances):
@@ -812,6 +839,7 @@ async def main():
 		log.detail('所有账号均不使用代理，跳过代理节点选择')
 
 	last_balance_hash = load_balance_hash()
+	balance_snapshot = load_balance_snapshot()
 
 	success_count = 0
 	total_count = len(accounts)
@@ -855,36 +883,49 @@ async def main():
 					total_before = before_quota + before_used
 					total_after = after_quota + after_used
 
-					check_in_reward = total_after - total_before
-					usage_increase = after_used - before_used
-					balance_change = after_quota - before_quota
+				check_in_reward = total_after - total_before
+				usage_increase = after_used - before_used
+				balance_change = after_quota - before_quota
 
-					account_check_in_details[account_key] = {
-						'name': account.get_display_name(i),
-						'unit': user_info_after.get('unit', 'usd'),
-						'before_quota': before_quota,
-						'before_used': before_used,
-						'after_quota': after_quota,
-						'after_used': after_used,
-						'check_in_reward': check_in_reward,
-						'usage_increase': usage_increase,
-						'balance_change': balance_change,
-						'success': success,
-					}
+				# 自动签到型（agentrouter/gorouter，登录即签到）：单次 before/after 对比无效
+				# （能拿到的 before 已是签到后），改为用"昨日总额快照"跨日估算今日奖励。
+				cross_day_estimated = False
+				provider_cfg = app_config.get_provider(account.provider)
+				if provider_cfg and not provider_cfg.needs_manual_check_in():
+					prev_total = balance_snapshot.get(account.get_display_name(i))
+					if prev_total is not None:
+						cross_day_reward = total_after - prev_total
+						if cross_day_reward > 0:
+							check_in_reward = cross_day_reward
+							cross_day_estimated = True
 
-					# 实时输出该账号签到结果明细（统一各路径日志，避免只体现在最终通知里）
-					unit = user_info_after.get('unit', 'usd')
-					if success and check_in_reward != 0:
-						log.success(
-							f'{account_name}: 签到获得 {_format_amount(check_in_reward, unit)}'
-							f'（余额 {_format_amount(before_quota, unit)} → {_format_amount(after_quota, unit)}）'
-						)
-					elif success and usage_increase != 0:
-						log.success(f'{account_name}: 今日已签到，期间消耗 {_format_amount(usage_increase, unit)}')
-					elif success:
-						log.success(f'{account_name}: 今日已签到，余额无变化')
-					else:
-						log.warn(f'{account_name}: 签到失败，当前余额 {_format_amount(after_quota, unit)}')
+				account_check_in_details[account_key] = {
+					'name': account.get_display_name(i),
+					'unit': user_info_after.get('unit', 'usd'),
+					'before_quota': before_quota,
+					'before_used': before_used,
+					'after_quota': after_quota,
+					'after_used': after_used,
+					'check_in_reward': check_in_reward,
+					'usage_increase': usage_increase,
+					'balance_change': balance_change,
+					'success': success,
+				}
+
+				# 实时输出该账号签到结果明细（统一各路径日志，避免只体现在最终通知里）
+				unit = user_info_after.get('unit', 'usd')
+				if success and check_in_reward != 0:
+					suffix = '（跨日估算）' if cross_day_estimated else ''
+					log.success(
+						f'{account_name}: 签到获得 {_format_amount(check_in_reward, unit)}{suffix}'
+						f'（余额 {_format_amount(before_quota, unit)} → {_format_amount(after_quota, unit)}）'
+					)
+				elif success and usage_increase != 0:
+					log.success(f'{account_name}: 今日已签到，期间消耗 {_format_amount(usage_increase, unit)}')
+				elif success:
+					log.success(f'{account_name}: 今日已签到，余额无变化')
+				else:
+					log.warn(f'{account_name}: 签到失败，当前余额 {_format_amount(after_quota, unit)}')
 
 			if should_notify_this_account:
 				account_name = account.get_display_name(i)
@@ -927,6 +968,14 @@ async def main():
 
 	if current_balance_hash:
 		save_balance_hash(current_balance_hash)
+
+	# 更新跨日总额快照：仅成功取到余额的账号写入最新总额，供次日还原自动签到奖励
+	for i, account in enumerate(accounts):
+		account_key = f'account_{i + 1}'
+		if account_key in current_balances:
+			bal = current_balances[account_key]
+			balance_snapshot[account.get_display_name(i)] = bal['quota'] + bal['used']
+	save_balance_snapshot(balance_snapshot)
 
 	# 签到总结：无论是否发通知都输出，用专门的分隔符标出，便于一眼看清整体结果
 	log.info('==================== [签到总结] ====================')

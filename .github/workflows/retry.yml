@@ -1,7 +1,10 @@
-name: AnyRouter 自动签到
+name: AnyRouter 签到重试
+# 每日补签：检测当日的签到工作流是否有失败账号，若有则补签一次（单次尝试），若无则直接结束。
+# 避免每日签到遇到代理/站点临时波动、短时间重试仍失败时，错过当日签到。
 on:
   schedule:
-    - cron: '0 1 * * *'
+    # 北京时间 16:00 = UTC 08:00（签到工作流为 UTC 01:00 = 北京时间 09:00）
+    - cron: '0 8 * * *'
   workflow_dispatch:
     inputs:
       debug:
@@ -11,7 +14,7 @@ on:
         type: boolean
 
 jobs:
-  checkin:
+  retry:
     runs-on: ubuntu-latest
     environment: production
     env:
@@ -40,27 +43,18 @@ jobs:
 
     - name: 安装依赖
       run: |
-        if [ "${DEBUG_MODE}" = "true" ]; then
-          uv sync --frozen
-        else
-          uv sync --frozen -q
-        fi
+        uv sync --frozen -q
         echo "✅ 环境初始化完成"
 
     - name: 安装系统依赖
       run: |
         PKGS="xvfb fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf"
-        if [ "${DEBUG_MODE}" = "true" ]; then
-          sudo apt-get update
-          sudo apt-get install -y ${PKGS}
-        else
-          sudo apt-get update -qq >/dev/null
-          sudo apt-get install -y -qq ${PKGS} >/dev/null 2>&1 || {
-            echo "系统依赖安装失败，重新执行以查看详细错误："
-            sudo apt-get install -y ${PKGS} 2>&1 | tail -60
-            exit 1
-          }
-        fi
+        sudo apt-get update -qq >/dev/null
+        sudo apt-get install -y -qq ${PKGS} >/dev/null 2>&1 || {
+          echo "系统依赖安装失败，重新执行以查看详细错误："
+          sudo apt-get install -y ${PKGS} 2>&1 | tail -60
+          exit 1
+        }
         echo "✅ 系统字体安装完成"
 
     - name: 缓存 CloakBrowser 二进制
@@ -74,17 +68,55 @@ jobs:
 
     - name: 安装 CloakBrowser
       run: |
-        if [ "${DEBUG_MODE}" = "true" ]; then
-          uv run python -m cloakbrowser install
-        else
-          uv run python -m cloakbrowser install >/tmp/cloakbrowser-install.log 2>&1 && echo "✅ CloakBrowser 安装完成" || {
-            echo "CloakBrowser 安装失败："
-            tail -40 /tmp/cloakbrowser-install.log
-            exit 1
-          }
+        uv run python -m cloakbrowser install >/tmp/cloakbrowser-install.log 2>&1 && echo "✅ CloakBrowser 安装完成" || {
+          echo "CloakBrowser 安装失败："
+          tail -40 /tmp/cloakbrowser-install.log
+          exit 1
+        }
+
+    # 检测今日签到运行结果：下载其 checkin-result artifact，解析失败账号索引
+    - name: 查找今日签到结果并解析失败账号
+      id: result
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        REPO="${GITHUB_REPOSITORY}"
+        TODAY="$(date -u +%F)"
+        RUN_ID="$(gh api "repos/${REPO}/actions/workflows/checkin.yml/runs" \
+          --jq '[.workflow_runs[] | select(.created_at | startswith("'"${TODAY}"'")) | select(.status == "completed")][0].id' 2>/dev/null || true)"
+        if [ -z "${RUN_ID:-}" ] || [ "${RUN_ID}" = "null" ]; then
+          echo "今日未找到已完成的签到运行，跳过重试"
+          echo "NEEDS_RETRY=false" >> "${GITHUB_OUTPUT}"
+          exit 0
         fi
+        if ! gh run download "${RUN_ID}" -n checkin-result -D /tmp/checkin-result -R "${REPO}" >/dev/null 2>&1; then
+          echo "未找到签到结果 artifact，跳过重试"
+          echo "NEEDS_RETRY=false" >> "${GITHUB_OUTPUT}"
+          exit 0
+        fi
+        python - <<'EOF'
+        import json, os
+        p = '/tmp/checkin-result/checkin_result.json'
+        try:
+            with open(p, encoding='utf-8') as f:
+                data = json.load(f)
+            failed = [int(x) for x in data.get('failed', []) if isinstance(x, (int, float))]
+        except Exception as e:
+            print(f'解析签到结果失败: {e}')
+            failed = []
+        print(f'失败账号索引: {failed}')
+        print(f"NEEDS_RETRY={'true' if failed else 'false'}")
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f"NEEDS_RETRY={'true' if failed else 'false'}\n")
+            if failed:
+                f.write(f"RETRY_INDEXES={json.dumps(failed)}\n")
+        if not failed:
+            print('今日签到无失败任务，无需重试')
+        EOF
 
     - name: 恢复余额历史缓存
+      if: steps.result.outputs.NEEDS_RETRY == 'true'
       uses: actions/cache@v5
       with:
         path: |
@@ -96,6 +128,7 @@ jobs:
           balance-hash-
 
     - name: 恢复浏览器 Profile 缓存
+      if: steps.result.outputs.NEEDS_RETRY == 'true'
       uses: actions/cache@v5
       with:
         path: .browser_profiles
@@ -104,6 +137,7 @@ jobs:
           browser-profiles-${{ runner.os }}-
 
     - name: 恢复设备指纹缓存
+      if: steps.result.outputs.NEEDS_RETRY == 'true'
       uses: actions/cache@v5
       with:
         path: .device_fp
@@ -112,6 +146,7 @@ jobs:
           device-fp-${{ runner.os }}-
 
     - name: 判断是否需要代理
+      if: steps.result.outputs.NEEDS_RETRY == 'true'
       id: needs-proxy
       env:
         ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
@@ -137,7 +172,7 @@ jobs:
         EOF
 
     - name: 配置代理
-      if: steps.needs-proxy.outputs.NEEDS_PROXY == 'true'
+      if: steps.result.outputs.NEEDS_RETRY == 'true' && steps.needs-proxy.outputs.NEEDS_PROXY == 'true'
       env:
         PROXY_SUBSCRIPTION_URL: ${{ secrets.PROXY_SUBSCRIPTION_URL }}
         PROXY_TEST_URL: https://www.google.com/generate_204
@@ -145,9 +180,12 @@ jobs:
         PROXY_REQUIRED: false
       run: bash scripts/setup_mihomo_proxy.sh
 
-    - name: 执行签到
+    - name: 补签失败账号
+      if: steps.result.outputs.NEEDS_RETRY == 'true'
       env:
         DEBUG_MODE: ${{ env.DEBUG_MODE }}
+        # 重试仅补签今日失败账号，单次尝试，不做节点多次重试
+        CHECKIN_RETRY_INDEXES: ${{ steps.result.outputs.RETRY_INDEXES }}
         # 关闭 cloakbrowser 后台"更新可用"线程提示，避免打断签到流程日志
         CLOAKBROWSER_AUTO_UPDATE: false
         CHECKIN_HEADLESS: false
@@ -177,38 +215,32 @@ jobs:
       run: |
         xvfb-run -a --server-args="-screen 0 1920x1080x24" uv run checkin.py
 
-    - name: 上传签到结果（供重试工作流判断今日失败账号）
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: checkin-result
-        path: checkin_result.json
-        if-no-files-found: ignore
-        retention-days: 2
-
-    - name: 上传调试截图
-      if: always() && env.DEBUG_MODE == 'true'
+    - name: 上传重试结果与调试截图
+      if: always() && steps.result.outputs.NEEDS_RETRY == 'true'
       env:
         HTTP_PROXY: ''
         HTTPS_PROXY: ''
       uses: actions/upload-artifact@v4
       with:
-        name: checkin-screenshots-${{ github.run_id }}
-        path: checkin_screenshots/
-        if-no-files-found: warn
+        name: checkin-retry-${{ github.run_id }}
+        path: |
+          checkin_result.json
+          checkin_screenshots/
+        if-no-files-found: ignore
         include-hidden-files: true
-        retention-days: 14
+        retention-days: 7
 
     - name: 停止代理
-      if: always() && steps.needs-proxy.outputs.NEEDS_PROXY == 'true'
+      if: always() && steps.result.outputs.NEEDS_RETRY == 'true' && steps.needs-proxy.outputs.NEEDS_PROXY == 'true'
       run: bash scripts/stop_mihomo_proxy.sh
 
     - name: 执行结果
       if: always()
       run: |
-        echo "签到任务执行完成"
-        echo "时间: $(date)"
-        if [ "${DEBUG_MODE}" = "true" ] && [ -d checkin_screenshots ] && [ "$(ls -A checkin_screenshots 2>/dev/null)" ]; then
-          echo "调试截图已上传为 artifact: checkin-screenshots-${{ github.run_id }}"
-          ls -la checkin_screenshots/
+        NEEDS_RETRY="${{ steps.result.outputs.NEEDS_RETRY }}"
+        if [ "${NEEDS_RETRY}" = "true" ]; then
+          echo "补签完成"
+        else
+          echo "今日签到无失败任务，重试工作流直接结束"
         fi
+        echo "时间: $(date)"

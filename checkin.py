@@ -50,6 +50,7 @@ from utils.proxy_selector import NodeSelector, available, current_proxy_node, no
 
 BALANCE_HASH_FILE = 'balance_hash.txt'
 BALANCE_SNAPSHOT_FILE = 'balance_snapshot.json'
+CHECKIN_RESULT_FILE = 'checkin_result.json'
 
 # 网络层异常（代理节点问题），用于触发"切换节点重试"
 _NETWORK_ERRORS = (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError)
@@ -126,6 +127,43 @@ def generate_balance_hash(balances):
 	)
 	balance_json = json.dumps(simple_balances, sort_keys=True, separators=(',', ':'))
 	return hashlib.sha256(balance_json.encode('utf-8')).hexdigest()[:16]
+
+
+def load_retry_indexes() -> list[int] | None:
+	"""解析重试模式要处理的账号原始索引（CHECKIN_RETRY_INDEXES，JSON 数组）。
+
+	返回 None 表示非重试模式；返回列表表示仅处理这些账号（单次尝试，不做节点多次重试）。
+	索引为账号在 ANYROUTER_ACCOUNTS 中的 0 基位置，与 checkin_result.json 里
+	记录的失败索引一一对应，保证跨工作流（签到 → 重试）筛选稳定。
+	"""
+	raw = os.getenv('CHECKIN_RETRY_INDEXES', '').strip()
+	if not raw:
+		return None
+	try:
+		data = json.loads(raw)
+		if not isinstance(data, list):
+			raise ValueError('不是数组')
+		return sorted({int(x) for x in data})
+	except Exception as e:
+		log.warn(f'CHECKIN_RETRY_INDEXES 无效: {raw!r} ({e})，忽略重试筛选')
+		return None
+
+
+def save_checkin_result(failed_indexes: list[int], total: int) -> None:
+	"""保存本次签到结果，供每日重试工作流判断哪些账号需要补签。
+
+	failed_indexes: 失败账号的原始配置索引（0 基）。
+	"""
+	try:
+		payload = {
+			'date': datetime.now().strftime('%Y-%m-%d'),
+			'total': total,
+			'failed': failed_indexes,
+		}
+		with open(CHECKIN_RESULT_FILE, 'w', encoding='utf-8') as f:
+			json.dump(payload, f, ensure_ascii=False)
+	except Exception as e:
+		log.warn(f'保存签到结果失败: {e}')
 
 
 def parse_cookies(cookies_data):
@@ -546,6 +584,19 @@ def format_check_in_notification(detail: dict) -> str:
 	def amount(value: float) -> str:
 		return _format_amount(value, unit)
 
+	# 自动签到型（agentrouter/gorouter）跨日估算：`登录即签到`，单次 before/after
+	# 均为签到后、无真实基线，展示"当前余额 + 跨日估算奖励"即可，避免"前后一致
+	# 却显示签到获得"的矛盾对比。
+	if detail.get('cross_day_estimated'):
+		lines = [
+			f'[CHECK-IN] {detail["name"]}',
+			'  ━━━━━━━━━━━━━━━━━━━━',
+			f'  当前余额: {amount(detail["after_quota"])}  |  累计消耗: {amount(detail["after_used"])}',
+		]
+		if detail['check_in_reward'] != 0:
+			lines.append(f'  签到获得(跨日估算): +{amount(detail["check_in_reward"])}')
+		return '\n'.join(lines)
+
 	lines = [
 		f'[CHECK-IN] {detail["name"]}',
 		'  ━━━━━━━━━━━━━━━━━━━━',
@@ -820,7 +871,20 @@ async def main():
 		notify.push_message('签到程序错误', '无法加载账号配置，程序退出', msg_type='text')
 		sys.exit(1)
 
-	log.info(f'发现 {len(accounts)} 个账号配置')
+	# 重试模式：仅处理 CHECKIN_RETRY_INDEXES 指定的原始索引账号，且单次尝试
+	# （不做节点多次重试——补签是独立工作流在数小时后运行，靠时间差规避临时波动即可）。
+	retry_indexes = load_retry_indexes()
+	is_retry = retry_indexes is not None
+	original_accounts: list[tuple[int, AccountConfig]] = list(enumerate(accounts))
+	if is_retry:
+		wanted = set(retry_indexes or [])
+		original_accounts = [(i, a) for (i, a) in original_accounts if i in wanted]
+		if not original_accounts:
+			log.info('重试列表为空或无匹配账号，跳过重试')
+			sys.exit(0)
+		accounts = [a for _, a in original_accounts]
+
+	log.info(f'发现 {len(accounts)} 个账号配置' + ('（重试模式）' if is_retry else ''))
 
 	# 初始化代理节点选择器；仅当存在 use_proxy=true 的账号需要代理时才选初始节点
 	node_selector = NodeSelector() if available() else None
@@ -847,17 +911,24 @@ async def main():
 	current_balances = {}
 	account_check_in_details = {}
 	notified_account_keys: set[str] = set()
+	failed_indexes: list[int] = []
 	need_notify = False
 	balance_changed = False
 
-	for i, account in enumerate(accounts):
+	for i, account in original_accounts:
 		account_key = f'account_{i + 1}'
 		account_name = account.get_display_name(i)
 		log.info(f'=============== [{i + 1}/{total_count}] {account_name} 开始 ===============')
 		try:
-			success, user_info_before, user_info_after = await check_in_account_with_retry(
-				account, i, app_config, node_selector
-			)
+			if is_retry:
+				# 补签：单次尝试，不做节点切换多次重试
+				success, user_info_before, user_info_after = await check_in_account(
+					account, i, app_config
+				)
+			else:
+				success, user_info_before, user_info_after = await check_in_account_with_retry(
+					account, i, app_config, node_selector
+				)
 			if success:
 				success_count += 1
 
@@ -866,6 +937,7 @@ async def main():
 			if not success:
 				should_notify_this_account = True
 				need_notify = True
+				failed_indexes.append(i)
 				account_name = account.get_display_name(i)
 				log.notify(f'{account_name} 失败，将发送通知')
 
@@ -909,6 +981,7 @@ async def main():
 					'check_in_reward': check_in_reward,
 					'usage_increase': usage_increase,
 					'balance_change': balance_change,
+					'cross_day_estimated': cross_day_estimated,
 					'success': success,
 				}
 
@@ -916,10 +989,16 @@ async def main():
 				unit = user_info_after.get('unit', 'usd')
 				if success and check_in_reward != 0:
 					suffix = '（跨日估算）' if cross_day_estimated else ''
-					log.success(
-						f'{account_name}: 签到获得 {_format_amount(check_in_reward, unit)}{suffix}'
-						f'（余额 {_format_amount(before_quota, unit)} → {_format_amount(after_quota, unit)}）'
-					)
+					if cross_day_estimated:
+						log.success(
+							f'{account_name}: 签到获得 {_format_amount(check_in_reward, unit)}{suffix}，'
+							f'当前余额 {_format_amount(after_quota, unit)}'
+						)
+					else:
+						log.success(
+							f'{account_name}: 签到获得 {_format_amount(check_in_reward, unit)}'
+							f'（余额 {_format_amount(before_quota, unit)} → {_format_amount(after_quota, unit)}）'
+						)
 				elif success and usage_increase != 0:
 					log.success(f'{account_name}: 今日已签到，期间消耗 {_format_amount(usage_increase, unit)}')
 				elif success:
@@ -942,6 +1021,8 @@ async def main():
 			account_name = account.get_display_name(i)
 			log.failed(f'{account_name} 处理异常: {e}')
 			need_notify = True
+			if i not in failed_indexes:
+				failed_indexes.append(i)
 			notification_content.append(f'[失败] {account_name} 异常: {str(e)[:50]}...')
 			notified_account_keys.add(account_key)
 
@@ -959,7 +1040,7 @@ async def main():
 			log.detail('未检测到余额变化')
 
 	if balance_changed:
-		for i, account in enumerate(accounts):
+		for i, account in original_accounts:
 			account_key = f'account_{i + 1}'
 			# 按 account_key 精确判重，避免"账号1"被"账号11"的条目误判为已通知
 			if account_key in account_check_in_details and account_key not in notified_account_keys:
@@ -970,7 +1051,7 @@ async def main():
 		save_balance_hash(current_balance_hash)
 
 	# 更新跨日总额快照：仅成功取到余额的账号写入最新总额，供次日还原自动签到奖励
-	for i, account in enumerate(accounts):
+	for i, account in original_accounts:
 		account_key = f'account_{i + 1}'
 		if account_key in current_balances:
 			bal = current_balances[account_key]
@@ -1017,7 +1098,10 @@ async def main():
 			notify_content += f'\n\n{screenshot_hint}'
 
 		print(notify_content)
-		notify_title = f'每日签到完成，成功 {success_count}，失败 {total_count - success_count}'
+		if is_retry:
+			notify_title = f'签到重试完成，成功 {success_count}，失败 {total_count - success_count}'
+		else:
+			notify_title = f'每日签到完成，成功 {success_count}，失败 {total_count - success_count}'
 		if notify.push_message(notify_title, notify_content, msg_type='text'):
 			log.notify('通知已发送')
 	elif need_notify:
@@ -1025,6 +1109,9 @@ async def main():
 	else:
 		log.info('未检测到余额变化，跳过通知')
 	log.info('====================================================')
+
+	# 落盘本次结果，供每日重试工作流判断哪些账号需要补签
+	save_checkin_result(failed_indexes, total_count)
 
 	sys.exit(0 if success_count > 0 else 1)
 

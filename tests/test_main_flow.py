@@ -39,6 +39,7 @@ def harness(monkeypatch, tmp_path):
 	"""隔离余额哈希文件、拦截通知，并用假 check_in_account 替换真实签到。"""
 	monkeypatch.setattr(checkin_module, 'BALANCE_HASH_FILE', str(tmp_path / 'balance_hash.txt'))
 	monkeypatch.setattr(checkin_module, 'BALANCE_SNAPSHOT_FILE', str(tmp_path / 'balance_snapshot.json'))
+	monkeypatch.setattr(checkin_module, 'CHECKIN_RESULT_FILE', str(tmp_path / 'checkin_result.json'))
 	monkeypatch.setattr(checkin_module, 'take_pending_screenshots', lambda: [])
 	spy = _NotifySpy()
 	monkeypatch.setattr(checkin_module.notify, 'push_message', spy.push_message)
@@ -374,7 +375,10 @@ class TestAutoCheckinCrossDay:
 		with pytest.raises(SystemExit):
 			await main()
 
-		assert '签到获得: +$25.00' in spy.body
+		assert '签到获得(跨日估算): +$25.00' in spy.body
+		# 自动签到型不渲染无真实基线的"签到前/后"对比，避免前后一致却报奖励的矛盾
+		assert '签到前' not in spy.body
+		assert '当前余额: $125.00  |  累计消耗: $0.00' in spy.body
 
 	async def test_no_snapshot_falls_back_to_no_change(self, harness):
 		"""无昨日快照（首次运行）时不估算奖励，仍显示'余额无变化'。"""
@@ -388,3 +392,73 @@ class TestAutoCheckinCrossDay:
 
 		assert '签到获得' not in spy.body
 		assert '今日已签到，无变化' in spy.body
+
+
+class TestRetryFlow:
+	"""重试工作流：CHECKIN_RETRY_INDEXES 按原始索引筛选、单次尝试、结果落盘。"""
+
+	async def test_retry_filters_and_single_attempt(self, harness, monkeypatch, tmp_path):
+		monkeypatch.setenv('CHECKIN_RETRY_INDEXES', '[1]')
+		accounts = [_account('A'), _account('B'), _account('C')]
+		harness(
+			accounts,
+			[
+				(True, _usd(1.0, 0.0), _usd(2.0, 0.0)),
+				(True, _usd(5.0, 0.0), _usd(5.0, 0.0)),
+				(True, _usd(1.0, 0.0), _usd(1.0, 0.0)),
+			],
+		)
+		# 重试模式下不得走节点多次重试
+		async def bomb_with_retry(*args, **kwargs):  # pragma: no cover
+			raise AssertionError('重试模式不应调用 check_in_account_with_retry')
+
+		monkeypatch.setattr(checkin_module, 'check_in_account_with_retry', bomb_with_retry)
+
+		# 记录实际被处理账号的原始索引
+		captured: dict = {}
+		orig = checkin_module.check_in_account
+
+		async def spy_check_in(account, index, app_config):
+			captured['index'] = index
+			return await orig(account, index, app_config)
+
+		monkeypatch.setattr(checkin_module, 'check_in_account', spy_check_in)
+
+		with pytest.raises(SystemExit) as exc:
+			await main()
+		assert exc.value.code == 0
+		assert captured.get('index') == 1  # 只重试索引 1
+
+		data = json.loads((tmp_path / 'checkin_result.json').read_text(encoding='utf-8'))
+		assert data['failed'] == []
+		assert data['total'] == 1
+
+	async def test_retry_empty_or_unmatched_exits_early(self, harness, monkeypatch):
+		monkeypatch.setenv('CHECKIN_RETRY_INDEXES', '[99]')  # 无匹配账号
+		spy = harness([_account('A')], [(True, _usd(1.0, 0.0), _usd(1.0, 0.0))])
+
+		with pytest.raises(SystemExit) as exc:
+			await main()
+
+		assert exc.value.code == 0
+		assert spy.messages == []  # 未触发任何签到/通知
+
+	async def test_results_record_failed_indexes(self, harness, tmp_path):
+		# 常规模式：部分失败 → 结果文件记录失败索引，退出码仍为 0（有成功）
+		accounts = [_account('A'), _account('B'), _account('C')]
+		harness(
+			accounts,
+			[
+				(True, _usd(1.0, 0.0), _usd(2.0, 0.0)),
+				(False, None, None),  # B 失败
+				(True, _usd(1.0, 0.0), _usd(1.0, 0.0)),
+			],
+		)
+
+		with pytest.raises(SystemExit) as exc:
+			await main()
+		assert exc.value.code == 0
+
+		data = json.loads((tmp_path / 'checkin_result.json').read_text(encoding='utf-8'))
+		assert data['failed'] == [1]
+		assert data['total'] == 3

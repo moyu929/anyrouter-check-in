@@ -123,40 +123,22 @@ class TestGenerateJztz:
 
 
 class TestBuildFakeFingerprint:
-	def test_has_33_items(self, monkeypatch, tmp_path):
-		monkeypatch.setattr('utils.gptgod._DEVICE_FP_DIR', str(tmp_path))
+	def test_has_33_items(self):
+		assert len(build_fake_fingerprint()) == 33
 
-		assert len(build_fake_fingerprint('a@example.com')) == 33
-
-	def test_device_fingerprint_is_stable_per_account(self, monkeypatch, tmp_path):
-		monkeypatch.setattr('utils.gptgod._DEVICE_FP_DIR', str(tmp_path))
-
-		first = build_fake_fingerprint('a@example.com')
-		second = build_fake_fingerprint('a@example.com')
-
-		# 索引 0/1/2/9/10 来自持久化的设备指纹，应跨调用保持一致
+	def test_device_fingerprint_is_stable(self):
+		# 设备身份字段（0/1/2/9/10）固定稳定，跨调用不变
+		first = build_fake_fingerprint()
+		second = build_fake_fingerprint()
 		for idx in (0, 1, 2, 9, 10):
 			assert first[idx] == second[idx]
 
-	def test_different_accounts_get_different_device_files(self, monkeypatch, tmp_path):
-		monkeypatch.setattr('utils.gptgod._DEVICE_FP_DIR', str(tmp_path))
-
-		build_fake_fingerprint('a@example.com')
-		build_fake_fingerprint('b@example.com')
-
-		assert len(list(tmp_path.glob('device_*.json'))) == 2
-
-	def test_expired_device_fingerprint_is_regenerated(self, monkeypatch, tmp_path):
-		monkeypatch.setattr('utils.gptgod._DEVICE_FP_DIR', str(tmp_path))
-
-		build_fake_fingerprint('a@example.com')
-		fp_file = next(iter(tmp_path.glob('device_*.json')))
-		stale = json.loads(fp_file.read_text(encoding='utf-8'))
-		original_canvas = stale['canvas']
-		stale['born_at'] = 0
-		fp_file.write_text(json.dumps(stale), encoding='utf-8')
-
-		assert build_fake_fingerprint('a@example.com')[0] != original_canvas
+	def test_device_identity_is_shared_across_accounts(self):
+		# 撤销"按账号持久化 + TTL 轮换"后，所有调用共用同一份稳定设备指纹
+		a = build_fake_fingerprint()
+		b = build_fake_fingerprint()
+		for idx in (0, 1, 2, 9, 10, 26, 27, 28, 31):
+			assert a[idx] == b[idx]
 
 
 class TestCreditsHelpers:

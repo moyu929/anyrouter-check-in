@@ -4,6 +4,7 @@ AnyRouter.top 自动签到脚本
 """
 
 import asyncio
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -28,6 +29,7 @@ load_dotenv()
 
 from utils.browser import (
 	BrowserLoginResult,
+	fetch_user_self_via_browser,
 	has_session_cookie,
 	is_logged_in,
 	launch_login_context,
@@ -485,6 +487,13 @@ def get_user_info(client, headers, user_info_url: str, *, propagate_network_erro
 		response = request_with_retry(client, 'GET', user_info_url, headers=headers, timeout=30)
 
 		if response.status_code == 200:
+			# 阿里云 WAF 拦截页（HTTP 200 + HTML），会令 response.json() 报
+			# "Expecting value: line 1 column 1 (char 0)"。识别后交给外层切换
+			# 代理节点重试，避免被误判成普通失败而错失当日签到。
+			if _WAF_BLOCK_MARKER in response.text:
+				if propagate_network_error:
+					raise ProxyNodeIssue('获取用户信息被阿里云 WAF 拦截')
+				return {'success': False, 'error': '获取用户信息失败: 被阿里云 WAF 拦截'}
 			data = response.json()
 			if data.get('success'):
 				user_data = data.get('data', {})
@@ -497,6 +506,8 @@ def get_user_info(client, headers, user_info_url: str, *, propagate_network_erro
 					'display': f'💰 当前余额: ${quota}, 已用: ${used_quota}',
 				}
 		return {'success': False, 'error': f'获取用户信息失败: HTTP {response.status_code}'}
+	except ProxyNodeIssue:
+		raise
 	except _NETWORK_ERRORS as e:
 		if propagate_network_error:
 			raise
@@ -509,6 +520,83 @@ def get_user_info(client, headers, user_info_url: str, *, propagate_network_erro
 		return {'success': False, 'error': f'获取用户信息失败: {str(e)[:50]}...'}
 	except Exception as e:
 		return {'success': False, 'error': f'获取用户信息失败: {str(e)[:50]}...'}
+
+
+def _user_info_from_profile(profile: dict, unit: str = 'usd') -> dict:
+	"""把浏览器取到的 user/self profile 转成统一的用户信息 dict。"""
+	quota = round(profile.get('quota', 0) / QUOTA_PER_DOLLAR, 2)
+	used = round(profile.get('used_quota', 0) / QUOTA_PER_DOLLAR, 2)
+	return {
+		'success': True,
+		'quota': quota,
+		'used_quota': used,
+		'unit': unit,
+		'display': f'💰 当前余额: ${quota}, 已用: ${used}',
+	}
+
+
+def _fetch_user_info_via_browser_sync(
+	account_name: str,
+	provider: str,
+	domain: str,
+	cookies: dict,
+	*,
+	use_proxy: bool = False,
+) -> dict | None:
+	"""在独立线程事件循环里用真浏览器获取用户余额（WAF JS 挑战兜底）。
+
+	run_check_in_requests 为同步、浏览器为 async，故放进独立线程跑独立 asyncio 循环。
+	真浏览器能自动解阿里云 WAF 的 JS 挑战并拿到 /api/user/self 的 JSON。
+	"""
+	try:
+		with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+			future = pool.submit(
+				asyncio.run,
+				fetch_user_self_via_browser(
+					account_name, provider, domain, cookies, use_proxy=use_proxy, persist_profile=False
+				),
+			)
+			profile = future.result(timeout=120)
+	except Exception as e:
+		log.warn(f'{account_name}: 浏览器兜底获取用户信息失败: {str(e)[:80]}')
+		return None
+	return _user_info_from_profile(profile, 'usd') if profile else None
+
+
+def _get_user_info_resilient(
+	client,
+	headers,
+	user_info_url: str,
+	account_name: str,
+	account: AccountConfig,
+	provider_config,
+	all_cookies: dict,
+	*,
+	use_proxy: bool,
+	browser_cache: dict,
+) -> dict:
+	"""httpx 取用户信息；被阿里云 WAF 挑战时改用真浏览器兜底。
+
+	proxy_node_issue 由 get_user_info 在识别到 WAF 拦截页时抛出。此处捕获后
+	先尝试浏览器兜底取余额；若浏览器也失败，则继续向上抛，交由外层切换节点重试。
+	"""
+	try:
+		return get_user_info(client, headers, user_info_url)
+	except ProxyNodeIssue as e:
+		# 仅尝试一次浏览器兜底，结果（含 None）缓存，避免多次 WAF 时重复启动浏览器
+		if 'browser_info' not in browser_cache:
+			log.warn(f'{account_name}: httpx 获取用户信息被拦截（{e}），改用浏览器获取余额')
+			browser_cache['browser_info'] = _fetch_user_info_via_browser_sync(
+				account_name,
+				account.provider,
+				provider_config.domain,
+				all_cookies,
+				use_proxy=use_proxy,
+			)
+		if browser_cache.get('browser_info'):
+			log.info(f'{account_name}: 浏览器兜底获取余额成功: {browser_cache["browser_info"]["display"]}')
+			return browser_cache['browser_info']
+		raise
 
 
 async def prepare_cookies(account_name: str, provider_config, user_cookies: dict) -> dict | None:
@@ -545,6 +633,10 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 	log.debug(f'{account_name}: 响应状态码 {response.status_code}')
 
 	if response.status_code == 200:
+		# 阿里云 WAF 拦截页（HTTP 200 + HTML）：识别后交给外层切换代理节点重试，
+		# 避免被当作普通签到失败而错失当日签到。
+		if _WAF_BLOCK_MARKER in response.text:
+			raise ProxyNodeIssue(f'{account_name}: 签到被阿里云 WAF 拦截')
 		try:
 			result = response.json()
 			if result.get('ret') == 1 or result.get('code') == 0 or result.get('success'):
@@ -766,7 +858,19 @@ def run_check_in_requests(
 				headers[provider_config.api_user_key] = api_user
 
 			user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
-			user_info_before = get_user_info(client, headers, user_info_url)
+			# httpx 取余额；被阿里云 WAF 挑战时用真浏览器兜底（能解 JS 挑战）
+			browser_cache: dict = {}
+			user_info_before = _get_user_info_resilient(
+				client,
+				headers,
+				user_info_url,
+				account_name,
+				account,
+				provider_config,
+				all_cookies,
+				use_proxy=use_proxy,
+				browser_cache=browser_cache,
+			)
 			if user_info_before and user_info_before.get('success'):
 				log.info(f'{account_name}: {user_info_before["display"]}')
 			elif user_info_before:
@@ -778,7 +882,17 @@ def run_check_in_requests(
 				user_info_after = get_user_info(client, headers, user_info_url, propagate_network_error=False)
 				return success, user_info_before, user_info_after
 
-			user_info_after = get_user_info(client, headers, user_info_url)
+			user_info_after = _get_user_info_resilient(
+				client,
+				headers,
+				user_info_url,
+				account_name,
+				account,
+				provider_config,
+				all_cookies,
+				use_proxy=use_proxy,
+				browser_cache=browser_cache,
+			)
 			if user_info_after and user_info_after.get('success'):
 				log.detail(f'{account_name}: 签到自动完成（由用户信息请求触发）')
 				return True, user_info_before, user_info_after
@@ -786,6 +900,9 @@ def run_check_in_requests(
 			log.failed(f'{account_name}: 自动签到失败 - {error}')
 			return False, user_info_before, user_info_after
 
+	except ProxyNodeIssue:
+		# 让代理节点问题（含阿里云 WAF 拦截）继续向上，交由 check_in_account_with_retry 切换节点重试
+		raise
 	except _NETWORK_ERRORS as e:
 		# 网络/超时/连接异常 → 可能为代理节点问题，交由外层切换节点重试
 		raise ProxyNodeIssue(f'{account_name}: 签到请求网络异常: {str(e)[:50]}') from e

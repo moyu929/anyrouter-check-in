@@ -10,7 +10,10 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from checkin import (
+	ProxyNodeIssue,
 	_format_amount,
+	_get_user_info_resilient,
+	_user_info_from_profile,
 	execute_check_in,
 	format_check_in_notification,
 	get_user_info,
@@ -195,6 +198,27 @@ class TestGetUserInfo:
 		assert info['success'] is False
 		assert '获取用户信息失败' in info['error']
 
+	def test_waf_block_raises_proxy_node_issue_when_propagate(self):
+		"""识别阿里云 WAF 拦截页（HTTP 200 + aliyun_waf HTML）→ 抛 ProxyNodeIssue 供换节点。"""
+
+		def handler(request: httpx.Request) -> httpx.Response:
+			return httpx.Response(200, text='<!doctype html><meta name="aliyun_waf_aa" content="block">')
+
+		with _mock_client(handler) as client, pytest.raises(ProxyNodeIssue):
+			get_user_info(client, {}, 'https://example.com/api/user/self')
+
+	def test_waf_block_returns_failure_when_not_propagate(self):
+		"""签到成功后查询余额（propagate=False）：WAF 拦截转为普通失败，不触发换节点。"""
+
+		def handler(request: httpx.Request) -> httpx.Response:
+			return httpx.Response(200, text='<!doctype html><meta name="aliyun_waf_aa" content="block">')
+
+		with _mock_client(handler) as client:
+			info = get_user_info(client, {}, 'https://example.com/api/user/self', propagate_network_error=False)
+
+		assert info['success'] is False
+		assert 'WAF' in info['error']
+
 
 class TestExecuteCheckIn:
 	provider = ProviderConfig(name='demo', domain='https://demo.example.com', sign_in_path='/api/user/sign_in')
@@ -235,6 +259,15 @@ class TestExecuteCheckIn:
 		with _mock_client(handler) as client:
 			assert execute_check_in(client, 'Account 1', self.provider, {}) is False
 
+	def test_waf_block_raises_proxy_node_issue(self):
+		"""阿里云 WAF 拦截页（200 + HTML）→ 抛 ProxyNodeIssue 供换节点，而非普通失败。"""
+
+		def handler(request: httpx.Request) -> httpx.Response:
+			return httpx.Response(200, text='<!doctype html><meta name="aliyun_waf_aa" content="block">')
+
+		with _mock_client(handler) as client, pytest.raises(ProxyNodeIssue):
+			execute_check_in(client, 'Account 1', self.provider, {})
+
 	def test_http_error_returns_false(self, monkeypatch):
 		monkeypatch.setattr('utils.http_client.time.sleep', lambda _s: None)
 
@@ -271,6 +304,73 @@ class TestExecuteCheckIn:
 			execute_check_in(client, 'Account 1', self.provider, headers)
 
 		assert headers == {'Referer': 'https://demo.example.com'}
+
+
+class TestUserInfoBrowserFallback:
+	"""_get_user_info_resilient：httpx 被 WAF 挑战时改用真浏览器兜底。"""
+
+	@pytest.fixture
+	def _setup(self):
+		account = AccountConfig(name='A', provider='agentrouter', cookies={'session': 'x'})
+		provider = ProviderConfig(
+			name='agentrouter',
+			domain='https://agentrouter.org',
+			user_info_path='/api/user/self',
+			api_user_key='new-api-user',
+		)
+		return account, provider
+
+	def test_no_waf_passthrough(self, monkeypatch, _setup):
+		account, provider = _setup
+		monkeypatch.setattr('checkin.get_user_info', lambda *a, **k: {'success': True, 'quota': 1.0})
+
+		out = _get_user_info_resilient(
+			None, {}, 'u', 'A', account, provider, {'session': 'x'}, use_proxy=False, browser_cache={}
+		)
+
+		assert out['success'] is True
+
+	def test_waf_falls_back_to_browser(self, monkeypatch, _setup):
+		account, provider = _setup
+
+		def raise_waf(*a, **k):
+			raise ProxyNodeIssue('WAF blocked')
+
+		monkeypatch.setattr('checkin.get_user_info', raise_waf)
+		monkeypatch.setattr(
+			'checkin._fetch_user_info_via_browser_sync',
+			lambda *a, **k: {'success': True, 'quota': 5.0, 'used_quota': 2.0, 'display': '💰 当前余额: $5.0, 已用: $2.0'},
+		)
+		cache: dict = {}
+
+		out = _get_user_info_resilient(
+			None, {}, 'u', 'A', account, provider, {'session': 'x'}, use_proxy=False, browser_cache=cache
+		)
+
+		assert out['quota'] == 5.0
+		assert cache.get('browser_info')  # 缓存浏览器结果，避免重复启动
+
+	def test_waf_browser_fails_reraises(self, monkeypatch, _setup):
+		account, provider = _setup
+
+		def raise_waf(*a, **k):
+			raise ProxyNodeIssue('WAF blocked')
+
+		monkeypatch.setattr('checkin.get_user_info', raise_waf)
+		monkeypatch.setattr('checkin._fetch_user_info_via_browser_sync', lambda *a, **k: None)
+
+		with pytest.raises(ProxyNodeIssue):
+			_get_user_info_resilient(
+				None, {}, 'u', 'A', account, provider, {'session': 'x'}, use_proxy=False, browser_cache={}
+			)
+
+	def test_profile_converts_to_usd(self):
+		info = _user_info_from_profile({'quota': 5_000_000, 'used_quota': 1_000_000}, 'usd')
+		assert info['success'] is True
+		assert info['quota'] == 10.0
+		assert info['used_quota'] == 2.0
+		assert '$10.0' in info['display']
+		assert '$2.0' in info['display']
 
 
 class TestRunCheckInRequests:

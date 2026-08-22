@@ -96,8 +96,7 @@ class _Scenario:
 
 @pytest.fixture
 def scenario_runner(monkeypatch, tmp_path):
-	"""把 _make_client 换成 MockTransport 客户端，并隔离设备指纹目录、消除 sleep。"""
-	monkeypatch.setattr(gptgod_module, '_DEVICE_FP_DIR', str(tmp_path))
+	"""把 _make_client 换成 MockTransport 客户端，并消除 sleep。"""
 	monkeypatch.setattr(gptgod_module.time, 'sleep', lambda _s: None)
 	monkeypatch.setattr('utils.http_client.time.sleep', lambda _s: None)
 

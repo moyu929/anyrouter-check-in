@@ -136,15 +136,6 @@ jobs:
         restore-keys: |
           browser-profiles-${{ runner.os }}-
 
-    - name: 恢复设备指纹缓存
-      if: steps.result.outputs.NEEDS_RETRY == 'true'
-      uses: actions/cache@v5
-      with:
-        path: .device_fp
-        key: device-fp-${{ runner.os }}-${{ github.run_id }}
-        restore-keys: |
-          device-fp-${{ runner.os }}-
-
     - name: 判断是否需要代理
       if: steps.result.outputs.NEEDS_RETRY == 'true'
       id: needs-proxy

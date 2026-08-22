@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
+from urllib.parse import urlparse
 
 from utils.debug import debug_print, is_debug_enabled, log
 from utils.popups import dismiss_popups, setup_popup_guard
@@ -340,8 +341,6 @@ async def navigate_login_page(
 	account_name: str = '',
 ) -> None:
 	"""预热站点、导航登录页并等待 SPA 渲染完成。"""
-	from urllib.parse import urlparse
-
 	parsed = urlparse(login_url)
 	base_url = f'{parsed.scheme}://{parsed.netloc}/'
 	attempt_timeout = min(timeout_ms, 60_000)
@@ -478,6 +477,51 @@ async def verify_browser_login(page: Page, console_url: str, timeout_ms: int) ->
 		debug_print(f'[警告] 登录验证失败: 当前 URL={page.url}')
 		log.warn('登录验证失败')
 	return None
+
+
+async def fetch_user_self_via_browser(
+	account_name: str,
+	provider: str,
+	domain: str,
+	cookies: dict[str, str],
+	*,
+	use_proxy: bool = False,
+	persist_profile: bool = False,
+	timeout_ms: int = SESSION_WAIT_TIMEOUT_MS,
+) -> dict | None:
+	"""用真浏览器获取 /api/user/self 的 JSON，自动执行 WAF 挑战 JS。
+
+	用于 httpx 直连被阿里云 WAF 挑战时的余额兜底：真浏览器的会话能解 JS 挑战，
+	从而拿到 profile（含 quota/used_quota）。失败返回 None。
+
+	参数:
+	  account_name/provider: 用于生成浏览器 profile 路径与日志。
+	  domain: 站点源，如 https://agentrouter.org。
+	  cookies: 需注入的会话 cookie（如 login 用 httpx OAuth 拿到的 session/acw_tc）。
+	  use_proxy: 浏览器是否走代理（与签到请求一致，保证出口一致）。
+	  persist_profile: 是否使用持久化 profile（兜底默认临时，免残留）。
+	"""
+	settings = load_browser_login_settings(account_name, provider, persist_profile=persist_profile)
+	host = urlparse(domain).hostname or ''
+	cookie_items = [
+		{'name': name, 'value': value, 'domain': host, 'path': '/'}
+		for name, value in cookies.items()
+		if value
+	]
+	context = await launch_login_context(settings, use_proxy=use_proxy)
+	try:
+		await context.add_cookies(cookie_items)
+		page = await context.new_page()
+		await prepare_browser_page(page)
+		return await verify_browser_login(page, f'{domain}/console', timeout_ms)
+	except Exception as e:
+		log.warn(f'浏览器兜底获取 {USER_SELF_API_SUFFIX} 失败: {e}')
+		return None
+	finally:
+		try:
+			await context.close()
+		except Exception:  # nosec B110
+			pass
 
 
 async def wait_for_waf_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS) -> None:

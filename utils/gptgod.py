@@ -14,10 +14,8 @@ GPTGod 纯 API 签到模块 — _jztz 签名算法实现
 import base64
 import hashlib
 import json
-import os
 import random
 import re
-import secrets
 import time
 from urllib.parse import unquote
 
@@ -82,86 +80,36 @@ def generate_jztz(fingerprint: list, py: list[int], mc: list[int]) -> str:
 # 伪造行为指纹
 # ---------------------------------------------------------------------------
 
-_SCREEN_RESOLUTIONS = [
-	'1920x1080x24',
-	'2560x1440x24',
-	'1366x768x24',
-	'1680x1050x24',
-	'1440x900x24',
-	'1536x864x24',
-	'1280x720x24',
-	'1600x900x24',
-]
-_CPU_CORES = [4, 8, 12, 16]
-_DEVICE_MEMORIES = [4, 8, 16]
-_LANGUAGES = ['zh-CN', 'zh-CN', 'zh-CN', 'en-US']
-_DEVICE_FP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.device_fp')
-_DEVICE_FP_TTL_DAYS = 5
+# 设备指纹：长期保持稳定，不做轮换。
+# 站点通常不会对长期不变的指纹起疑，反而短期频繁轮换更易被识别为异常脚本。
+# 依据项目"签到分支只含纯签到逻辑、资源/通用能力收敛于中心系统"的架构原则，
+# 去掉按账号持久化 + TTL 轮换的机制，改用一份固定指纹；仅保留单次访问的行为
+# 参数（停留时长、点击时序等）随机，以贴近真实浏览器访问。
+_DEVICE_FP = {
+	'canvas': '3f6d5c2a9b8e47f1a2d3e4b5c6012345',
+	'webgl': '9c4a8f2b7d3e6015a8f3c2b1d9e4a6f5',
+	'audio': '6b2e8c5a4d3f1079e2b8a6c4d0f3e5a7',
+	'screen': '1920x1080x24',
+	'cpu': 8,
+	'memory': 16,
+	'fonts': '110010101110101100101010110010',
+	'language': 'zh-CN',
+	'plugins': 5,
+	'ph1': 'a1b2c3d4e5f60718',
+	'ph2': '9f8e7d6c5b4a3921',
+	'ph3': '0f1e2d3c4b5a6978',
+	'ph4': 42,
+	'ph5': 57,
+	'ph6': 'c0ffeeddccbbaa99',
+}
 
 
-def _random_hex(length: int) -> str:
-	return secrets.token_hex(length // 2)
+def build_fake_fingerprint() -> list:
+	"""构造 33 项行为指纹数组。
 
-
-def _random_font_fingerprint() -> str:
-	length = random.randint(20, 40)
-	return ''.join(str(random.randint(0, 1)) for _ in range(length))
-
-
-def _generate_device_fingerprint() -> dict:
-	return {
-		'canvas': _random_hex(32),
-		'webgl': _random_hex(32),
-		'audio': _random_hex(32),
-		'screen': random.choice(_SCREEN_RESOLUTIONS),
-		'cpu': random.choice(_CPU_CORES),
-		'memory': random.choice(_DEVICE_MEMORIES),
-		'fonts': _random_font_fingerprint(),
-		'language': random.choice(_LANGUAGES),
-		'plugins': random.randint(3, 7),
-		'ph1': _random_hex(16),
-		'ph2': _random_hex(16),
-		'ph3': _random_hex(16),
-		'ph4': random.randint(0, 100),
-		'ph5': random.randint(0, 100),
-		'ph6': _random_hex(16),
-		'born_at': int(time.time()),
-	}
-
-
-def _load_device_fingerprint(account_key: str) -> dict:
-	"""加载或生成设备指纹，按账号隔离、带 TTL 轮换。"""
-	account_hash = hashlib.md5(  # nosec B324 - 仅用于文件名派生，非安全用途
-		account_key.encode('utf-8'), usedforsecurity=False
-	).hexdigest()[:8]
-	fp_file = os.path.join(_DEVICE_FP_DIR, f'device_{account_hash}.json')
-
-	fp: dict | None = None
-	try:
-		if os.path.exists(fp_file):
-			with open(fp_file, 'r', encoding='utf-8') as f:
-				fp = json.load(f)
-			born_at = fp.get('born_at', 0)
-			if (time.time() - born_at) / 86400 > _DEVICE_FP_TTL_DAYS:
-				fp = None
-	except Exception:
-		fp = None
-
-	if fp is None:
-		fp = _generate_device_fingerprint()
-		try:
-			os.makedirs(_DEVICE_FP_DIR, exist_ok=True)
-			with open(fp_file, 'w', encoding='utf-8') as f:
-				json.dump(fp, f, ensure_ascii=False)
-		except OSError:
-			pass
-
-	return fp
-
-
-def build_fake_fingerprint(account_key: str) -> list:
-	"""构造 33 项行为指纹数组。"""
-	dev = _load_device_fingerprint(account_key)
+	设备身份字段使用固定稳定指纹；仅保留单次访问的行为参数（停留/时序）随机。
+	"""
+	dev = _DEVICE_FP
 	stay_ms = random.randint(3000, 15000)
 	return [
 		dev['canvas'],  # 0
@@ -351,7 +299,7 @@ def gptgod_checkin(
 		py, mc = params
 
 		# ---- 6. 生成 _jztz 并签到 ----
-		fingerprint = build_fake_fingerprint(email)
+		fingerprint = build_fake_fingerprint()
 		try:
 			_jztz = generate_jztz(fingerprint, py, mc)
 		except Exception as e:

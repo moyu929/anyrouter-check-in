@@ -127,6 +127,85 @@ class TestNotifyX:
 		with pytest.raises(ValueError, match='NotifyX key not configured'):
 			kit().send_notifyx('标题', '正文')
 
+	def test_description_included_when_provided(self, kit, post_spy, monkeypatch):
+		monkeypatch.setenv('NOTIFYX_KEY', 'notifyxkey')
+		client, _ = post_spy
+
+		kit().send_notifyx('标题', '正文', description='成功 4/5')
+
+		payload = client.post.call_args[1]['json']
+		assert payload['description'] == '成功 4/5'
+
+	def test_description_omitted_when_empty(self, kit, post_spy, monkeypatch):
+		monkeypatch.setenv('NOTIFYX_KEY', 'notifyxkey')
+		client, _ = post_spy
+
+		kit().send_notifyx('标题', '正文')
+
+		assert 'description' not in client.post.call_args[1]['json']
+
+
+class TestMarkdownDispatch:
+	"""push_message(msg_type='markdown') 的渠道分发适配。"""
+
+	MD = '**1. 账号A** ✅\n签到前余额: $10.00'
+
+	def test_notifyx_receives_markdown_as_is(self, kit, post_spy, monkeypatch):
+		monkeypatch.setenv('NOTIFYX_KEY', 'notifyxkey')
+		client, _ = post_spy
+		instance = kit()
+
+		instance.push_message('标题', self.MD, msg_type='markdown', description='成功 1/1')
+
+		payload = client.post.call_args[1]['json']
+		assert payload['content'] == self.MD  # NotifyX 原生支持 Markdown，原样发送
+		assert payload['description'] == '成功 1/1'
+
+	def test_plain_text_channels_receive_stripped_content(self, kit, monkeypatch):
+		monkeypatch.setenv('DINGDING_WEBHOOK', 'https://oapi.dingtalk.com/robot/send?token=x')
+		instance = kit()
+		sent = {}
+		monkeypatch.setattr(instance, '_post_json', lambda service, url, data: sent.update({service: data}))
+
+		instance.push_message('标题', self.MD, msg_type='markdown')
+
+		dingtalk_body = sent['DingTalk']['text']['content']
+		assert '**' not in dingtalk_body
+		assert '1. 账号A ✅' in dingtalk_body
+
+	def test_feishu_receives_markdown_as_is(self, kit, monkeypatch):
+		monkeypatch.setenv('FEISHU_WEBHOOK', 'https://open.feishu.cn/hook/x')
+		instance = kit()
+		sent = {}
+		monkeypatch.setattr(instance, '_post_json', lambda service, url, data: sent.update({service: data}))
+
+		instance.push_message('标题', self.MD, msg_type='markdown')
+
+		card_content = sent['Feishu']['card']['elements'][0]['content']
+		assert card_content == self.MD
+
+	def test_telegram_receives_html_bold(self, kit, post_spy, monkeypatch):
+		monkeypatch.setenv('TELEGRAM_BOT_TOKEN', 'tok')
+		monkeypatch.setenv('TELEGRAM_CHAT_ID', '42')
+		client, _ = post_spy
+
+		kit().push_message('标题', self.MD, msg_type='markdown')
+
+		data = client.post.call_args[1]['json']
+		assert data['parse_mode'] == 'HTML'
+		assert '<b>1. 账号A</b> ✅' in data['text']
+		assert '**' not in data['text']
+
+	def test_text_mode_keeps_content_unchanged_for_plain_channels(self, kit, monkeypatch):
+		monkeypatch.setenv('DINGDING_WEBHOOK', 'https://oapi.dingtalk.com/robot/send?token=x')
+		instance = kit()
+		sent = {}
+		monkeypatch.setattr(instance, '_post_json', lambda service, url, data: sent.update({service: data}))
+
+		instance.push_message('标题', '正文', msg_type='text')
+
+		assert sent['DingTalk']['text']['content'] == '标题\n正文'
+
 
 class TestServerPush:
 	def test_url_contains_key(self, kit, post_spy, monkeypatch):

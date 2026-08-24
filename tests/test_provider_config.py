@@ -94,3 +94,68 @@ def test_load_from_env_partial_override_inherits_builtin(monkeypatch):
 	assert config.providers['gptgod'].domain == 'https://gptgod.online'
 	assert config.providers['lyclaude'].use_proxy is True
 	assert config.providers['lyclaude'].domain == 'https://free.lyclaude.site'
+
+
+class TestWildcardProviderConfig:
+	"""通配符 "*"：一键控制全部提供商代理开关（优先级：内置默认 < "*" < 具体条目）。"""
+
+	def test_wildcard_enables_proxy_for_all_builtin_providers(self, monkeypatch):
+		monkeypatch.setenv('PROVIDERS', json.dumps({'*': {'use_proxy': True}}))
+
+		config = AppConfig.load_from_env()
+
+		# 内置默认直连的站点被通配符打开，内置默认走代理的保持开启
+		assert config.providers['gptgod'].use_proxy is True
+		assert config.providers['lyclaude'].use_proxy is True
+		assert config.providers['hcnsec'].use_proxy is True
+		assert config.providers['agentrouter'].use_proxy is True
+
+	def test_wildcard_disables_proxy_for_all_builtin_providers(self, monkeypatch):
+		monkeypatch.setenv('PROVIDERS', json.dumps({'*': {'use_proxy': False}}))
+
+		config = AppConfig.load_from_env()
+
+		# 内置默认走代理的 agentrouter/gorouter 也被通配符关闭
+		assert config.providers['agentrouter'].use_proxy is False
+		assert config.providers['gorouter'].use_proxy is False
+
+	def test_specific_entry_overrides_wildcard(self, monkeypatch):
+		monkeypatch.setenv(
+			'PROVIDERS',
+			json.dumps({'*': {'use_proxy': True}, 'gptgod': {'use_proxy': False}}),
+		)
+
+		config = AppConfig.load_from_env()
+
+		assert config.providers['gptgod'].use_proxy is False
+		assert config.providers['lyclaude'].use_proxy is True
+
+	def test_wildcard_keeps_builtin_domain(self, monkeypatch):
+		"""通配符仅写 use_proxy 时，domain 等其余字段从内置默认继承。"""
+		monkeypatch.setenv('PROVIDERS', json.dumps({'*': {'use_proxy': True}}))
+
+		config = AppConfig.load_from_env()
+
+		assert config.providers['gptgod'].domain == 'https://gptgod.online'
+		assert config.providers['agentrouter'].domain == 'https://agentrouter.org'
+
+	def test_empty_specific_entry_inherits_wildcard_fields(self, monkeypatch):
+		"""具体条目为空对象时继承通配符字段（通配铺底、具体覆盖的合并语义）。"""
+		monkeypatch.setenv(
+			'PROVIDERS',
+			json.dumps({'*': {'use_proxy': True}, 'hcnsec': {}}),
+		)
+
+		config = AppConfig.load_from_env()
+
+		assert config.providers['hcnsec'].use_proxy is True
+		assert config.providers['hcnsec'].domain == 'https://api.hcnsec.cn'
+
+	def test_non_dict_wildcard_is_ignored(self, monkeypatch):
+		"""非法通配符（非 JSON 对象）被忽略，仅用内置默认。"""
+		monkeypatch.setenv('PROVIDERS', json.dumps({'*': True}))
+
+		config = AppConfig.load_from_env()
+
+		assert config.providers['gptgod'].use_proxy is False
+		assert config.providers['agentrouter'].use_proxy is True

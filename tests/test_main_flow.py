@@ -26,7 +26,7 @@ class _NotifySpy:
 	def __init__(self):
 		self.messages: list[tuple[str, str]] = []
 
-	def push_message(self, title: str, content: str, msg_type: str = 'text') -> None:
+	def push_message(self, title: str, content: str, msg_type: str = 'text', description: str = '') -> None:
 		self.messages.append((title, content))
 
 	@property
@@ -101,7 +101,7 @@ class TestMainNotification:
 
 		assert exc.value.code == 0
 		assert '首次' not in spy.body  # 日志用语不进通知正文
-		assert '[CHECK-IN] 主号' in spy.body
+		assert '**1. 主号**' in spy.body
 		assert '签到获得: +$25.00' in spy.body
 		assert '成功: 1/1' in spy.body
 
@@ -121,6 +121,28 @@ class TestMainNotification:
 
 		assert len(spy.messages) == 1
 
+	async def test_success_with_unknown_balance_still_appears_in_notification(self, harness):
+		"""签到成功但余额查询失败（如自动签到型遇 WAF）：通知中必须出现该账号，
+		显示"签到成功 + 余额未获取"，而不是从通知里凭空消失。"""
+		spy = harness(
+			[_account('agentrouter')],
+			[
+				(
+					True,
+					{'success': False, 'quota': 0, 'used_quota': 0, 'error': '余额查询失败（WAF/网络异常）: aliyun_waf_aa'},
+					{'success': False, 'quota': 0, 'used_quota': 0, 'error': '余额查询失败（WAF/网络异常）: aliyun_waf_aa'},
+				)
+			],
+		)
+
+		with pytest.raises(SystemExit) as exc:
+			await main()
+
+		assert exc.value.code == 0
+		assert '**1. agentrouter** ✅ 签到成功' in spy.body
+		assert '余额未获取' in spy.body
+		assert '成功: 1/1' in spy.body
+
 	async def test_failure_always_notifies(self, harness):
 		spy = harness([_account('主号')], [(False, None, None)])
 
@@ -128,7 +150,8 @@ class TestMainNotification:
 			await main()
 
 		assert exc.value.code == 1
-		assert '[失败] 主号' in spy.body
+		assert '**1. 主号** ❌' in spy.body
+		assert '失败原因' in spy.body
 		assert '失败: 1/1' in spy.body
 
 	async def test_similar_account_names_are_not_deduplicated(self, harness):
@@ -141,7 +164,7 @@ class TestMainNotification:
 			await main()
 
 		for i in range(11):
-			assert f'[CHECK-IN] 账号{i + 1}' in spy.body
+			assert f'**{i + 1}. 账号{i + 1}**' in spy.body
 
 	async def test_account_is_not_reported_twice(self, harness):
 		"""失败账号已在明细区列出时，不应再追加一条签到详情。"""
@@ -378,10 +401,11 @@ class TestAutoCheckinCrossDay:
 		assert '签到获得(跨日估算): +$25.00' in spy.body
 		# 自动签到型不渲染无真实基线的"签到前/后"对比，避免前后一致却报奖励的矛盾
 		assert '签到前' not in spy.body
-		assert '当前余额: $125.00  |  累计消耗: $0.00' in spy.body
+		assert '当前余额: $125.00' in spy.body
+		assert '累积消耗: $0.00' in spy.body
 
 	async def test_no_snapshot_falls_back_to_no_change(self, harness):
-		"""无昨日快照（首次运行）时不估算奖励，仍显示'余额无变化'。"""
+		"""无昨日快照（首次运行）时不估算奖励，仍显示'已签到'。"""
 		spy = harness(
 			[_account('主号', 'agentrouter')],
 			[(True, _usd(125.0, 0.0), _usd(125.0, 0.0))],
@@ -391,7 +415,8 @@ class TestAutoCheckinCrossDay:
 			await main()
 
 		assert '签到获得' not in spy.body
-		assert '今日已签到，无变化' in spy.body
+		assert '今日已签到' in spy.body
+		assert '当前余额: $125.00' in spy.body
 
 
 class TestRetryFlow:
@@ -408,6 +433,7 @@ class TestRetryFlow:
 				(True, _usd(1.0, 0.0), _usd(1.0, 0.0)),
 			],
 		)
+
 		# 重试模式下不得走节点多次重试
 		async def bomb_with_retry(*args, **kwargs):  # pragma: no cover
 			raise AssertionError('重试模式不应调用 check_in_account_with_retry')

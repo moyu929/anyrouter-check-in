@@ -147,15 +147,17 @@ jobs:
         import json, os
         accounts = json.loads(os.getenv('ANYROUTER_ACCOUNTS') or '[]')
         providers = json.loads(os.getenv('PROVIDERS') or '{}')
-        # 内置默认 use_proxy=true 的提供商（PROVIDERS 可覆盖 use_proxy）
-        default_use_proxy = {'agentrouter'}
-        needs = False
-        for acc in accounts:
-            p = acc.get('provider', 'anyrouter')
-            pconf = providers.get(p, {})
-            if pconf.get('use_proxy', p in default_use_proxy):
-                needs = True
-                break
+        # 通配符 "*"：一键控制全部提供商代理开关（优先级：内置默认 < "*" < 具体条目）
+        wildcard = providers.get('*')
+        builtin_use_proxy = {'agentrouter'}
+        def _uses_proxy(name):
+            pconf = providers.get(name)
+            if isinstance(pconf, dict) and 'use_proxy' in pconf:
+                return bool(pconf['use_proxy'])
+            if isinstance(wildcard, dict) and 'use_proxy' in wildcard:
+                return bool(wildcard['use_proxy'])
+            return name in builtin_use_proxy
+        needs = any(_uses_proxy(acc.get('provider', 'anyrouter')) for acc in accounts)
         value = 'true' if needs else 'false'
         print(f"NEEDS_PROXY={value}")
         with open(os.environ['GITHUB_OUTPUT'], 'a') as f:

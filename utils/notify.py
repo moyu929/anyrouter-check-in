@@ -1,11 +1,28 @@
 import os
+import re
 import smtplib
 from email.mime.text import MIMEText
+from html import escape as html_escape
 from typing import Any, Literal
 
 import httpx
 
 from utils.debug import log
+
+_BOLD_MD_RE = re.compile(r'\*\*(.+?)\*\*', re.DOTALL)
+
+
+def _strip_markdown_bold(text: str) -> str:
+	"""纯文本渠道降级：去掉 **粗体** 标记，避免显示字面星号。"""
+	return _BOLD_MD_RE.sub(r'\1', text)
+
+
+def _markdown_bold_to_html(text: str) -> str:
+	"""Markdown 粗体 → HTML <b>（Telegram parse_mode='HTML' 用）。
+
+	其余字符做 HTML 转义，防止消息里的 < > & 破坏解析。
+	"""
+	return _BOLD_MD_RE.sub(r'<b>\1</b>', html_escape(text, quote=False))
 
 
 class NotificationKit:
@@ -161,12 +178,15 @@ class NotificationKit:
 
 		self._post_json('Bark', url, data)
 
-	def send_notifyx(self, title: str, content: str):
+	def send_notifyx(self, title: str, content: str, description: str = ''):
 		if not self.notifyx_key:
 			raise ValueError('NotifyX key not configured')
 
 		# NotifyX 多通道推送平台，文档: https://www.notifyx.cn/help
+		# content 支持 Markdown（≤2000 字符）；description 为通知栏简介（≤500 字符）
 		data = {'title': title, 'content': content}
+		if description:
+			data['description'] = description
 		if self.notifyx_team:
 			data['team'] = self.notifyx_team
 
@@ -187,23 +207,47 @@ class NotificationKit:
 			or self.notifyx_key
 		)
 
-	def push_message(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text') -> bool:
-		"""推送通知。返回是否实际发送（False 表示未配置任何渠道而跳过）。"""
+	def push_message(
+		self,
+		title: str,
+		content: str,
+		msg_type: Literal['text', 'html', 'markdown'] = 'text',
+		description: str = '',
+	) -> bool:
+		"""推送通知。返回是否实际发送（False 表示未配置任何渠道而跳过）。
+
+		msg_type='markdown' 时的渠道适配：
+		  * NotifyX（文档原生支持 Markdown）/ 飞书（markdown 卡片）→ 原样发送；
+		  * Telegram（parse_mode=HTML）→ **粗体** 转 <b>；
+		  * 其余纯文本渠道 → 去掉 ** 标记降级发送。
+		"""
 		if not self._any_channel_configured():
 			log.notify('未配置任何通知渠道，跳过推送')
 			return False
 
+		if msg_type == 'markdown':
+			md_content = content
+			plain_content = _strip_markdown_bold(content)
+			telegram_content = _markdown_bold_to_html(content)
+		else:
+			md_content = plain_content = telegram_content = content
+
+		if msg_type == 'html':
+			email_body, email_subtype = content, 'html'
+		else:
+			email_body, email_subtype = plain_content, 'text'
+
 		notifications = [
-			('Email', lambda: self.send_email(title, content, msg_type)),
-			('PushPlus', lambda: self.send_pushplus(title, content)),
-			('Server Push', lambda: self.send_serverPush(title, content)),
-			('DingTalk', lambda: self.send_dingtalk(title, content)),
-			('Feishu', lambda: self.send_feishu(title, content)),
-			('WeChat Work', lambda: self.send_wecom(title, content)),
-			('Gotify', lambda: self.send_gotify(title, content)),
-			('Telegram', lambda: self.send_telegram(title, content)),
-			('Bark', lambda: self.send_bark(title, content)),
-			('NotifyX', lambda: self.send_notifyx(title, content)),
+			('Email', lambda: self.send_email(title, email_body, email_subtype)),
+			('PushPlus', lambda: self.send_pushplus(title, plain_content)),
+			('Server Push', lambda: self.send_serverPush(title, plain_content)),
+			('DingTalk', lambda: self.send_dingtalk(title, plain_content)),
+			('Feishu', lambda: self.send_feishu(title, md_content)),
+			('WeChat Work', lambda: self.send_wecom(title, plain_content)),
+			('Gotify', lambda: self.send_gotify(title, plain_content)),
+			('Telegram', lambda: self.send_telegram(title, telegram_content)),
+			('Bark', lambda: self.send_bark(title, plain_content)),
+			('NotifyX', lambda: self.send_notifyx(title, md_content, description)),
 		]
 
 		for name, func in notifications:

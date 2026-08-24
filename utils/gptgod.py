@@ -1,13 +1,16 @@
 """
 GPTGod 纯 API 签到模块 — _jztz 签名算法实现
 
-签到流程:
-  1. POST /api/user/login 登录拿 cookies
-  2. GET /api/user/register-config 拿 {_e, _k, _n}
-  3. wa(_e, _k) 解密 _e 得到签名函数的 JS 代码
-  4. 从 JS 代码提取 py（重排表）和 mc（XOR 密钥）
-  5. 构造伪造的 33 项行为指纹数组
-  6. 用签名算法处理指纹，生成 _jztz
+本分支仅保留差异逻辑（_jztz 加密签名协议、积分单位），标准流程
+（登录 → 前积分 → 签到 → 后积分）由 utils.checkin_core.run_standard_checkin 编排。
+
+签到协议:
+  1. POST /api/user/login 登录拿 cookies（密码 MD5）
+  2. GET /api/user/info 查积分与签到状态（checkin 字段预判幂等）
+  3. GET /api/user/register-config 拿 {_e, _k, _n}
+  4. wa(_e, _k) 解密 _e 得到签名函数的 JS 代码
+  5. 从 JS 代码提取 py（重排表）和 mc（XOR 密钥）
+  6. 构造伪造的 33 项行为指纹数组，生成 _jztz
   7. POST /api/user/checkin body={_k, _jztz}
 """
 
@@ -21,6 +24,7 @@ from urllib.parse import unquote
 
 import httpx
 
+from utils.checkin_core import build_user_info, login_failed_info, run_standard_checkin
 from utils.debug import log
 from utils.http_client import create_client, request_with_retry
 
@@ -190,23 +194,13 @@ def _get_user_info(client: httpx.Client) -> dict | None:
 
 
 def _credits_info(credits_value: int | None) -> dict:
-	"""构造与主流程兼容的用户信息字典。
-
-	GPTGod 的余额单位是积分而非美元，unit 字段供通知层区分渲染。
-	"""
-	amount = credits_value or 0
-	return {
-		'success': True,
-		'quota': amount,
-		'used_quota': 0,
-		'unit': 'credits',
-		'display': f'💰 当前积分: {amount}',
-	}
+	"""构造与主流程兼容的用户信息字典（GPTGod 余额单位是积分，unit 供通知层区分渲染）。"""
+	return build_user_info(credits_value or 0, 0, 'credits')
 
 
 def _login_failed_info() -> dict:
 	"""登录失败时的占位用户信息。"""
-	return {'success': False, 'quota': 0, 'used_quota': 0, 'unit': 'credits', 'error': 'Login failed'}
+	return login_failed_info('credits')
 
 
 def gptgod_checkin(
@@ -215,98 +209,100 @@ def gptgod_checkin(
 	password: str,
 	use_proxy: bool = False,
 ) -> tuple[bool, dict | None, dict | None]:
-	"""GPTGod 纯 API 签到：登录 → 获取配置 → 生成 _jztz → 签到。
+	"""GPTGod 纯 API 签到：登录 → 获取配置 → 生成 _jztz → 签到（流程见 checkin_core）。
 
 	返回 (success, user_info_before, user_info_after) 与主流程格式一致。
 	"""
 	client = _make_client(use_proxy=use_proxy)
-
 	try:
-		# ---- 1. 预热 ----
-		try:
-			request_with_retry(
-				client,
-				'GET',
-				f'{BASE}/',
-				timeout=30,
-				headers={'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'},
-			)
-			xsrf = client.cookies.get('XSRF-TOKEN')
-			if xsrf:
-				client.headers.update({'X-XSRF-TOKEN': unquote(xsrf)})
-		except Exception as e:
-			log.warn(f'{account_name}: 预热请求失败: {e}')
+		# 状态记录：首查/次查积分与原始 info（None 表示查询失败，防假成功校验需区分）
+		state = {'calls': 0, 'credits': [None, None], 'raw': [None, None]}
 
-		# ---- 2. 登录 ----
-		# 对方协议要求提交 MD5 后的密码，非本地安全用途
-		password_md5 = hashlib.md5(  # nosec B324
-			password.encode('utf-8'), usedforsecurity=False
-		).hexdigest()
-		try:
-			login_resp = request_with_retry(
-				client,
-				'POST',
-				f'{BASE}/api/user/login',
-				json={'email': email, 'password': password_md5, 'auto_login': True},
-				timeout=30,
-			)
-			login_data = login_resp.json() if login_resp.status_code == 200 else {}
-			if login_data.get('code') != 0:
-				err = login_data.get('msg', f'HTTP {login_resp.status_code}')
-				log.failed(f'{account_name}: 登录失败 - {err}')
-				return False, _login_failed_info(), None
-		except Exception as e:
-			log.failed(f'{account_name}: 登录请求失败: {e}')
-			return False, _login_failed_info(), None
+		def authenticate() -> bool:
+			# 预热（拿 XSRF-TOKEN cookie）
+			try:
+				request_with_retry(
+					client,
+					'GET',
+					f'{BASE}/',
+					timeout=30,
+					headers={'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'},
+				)
+				xsrf = client.cookies.get('XSRF-TOKEN')
+				if xsrf:
+					client.headers.update({'X-XSRF-TOKEN': unquote(xsrf)})
+			except Exception as e:
+				log.warn(f'{account_name}: 预热请求失败: {e}')
 
-		log.detail(f'{account_name}: 登录成功')
+			# 登录（对方协议要求提交 MD5 后的密码，非本地安全用途）
+			password_md5 = hashlib.md5(  # nosec B324
+				password.encode('utf-8'), usedforsecurity=False
+			).hexdigest()
+			try:
+				login_resp = request_with_retry(
+					client,
+					'POST',
+					f'{BASE}/api/user/login',
+					json={'email': email, 'password': password_md5, 'auto_login': True},
+					timeout=30,
+				)
+				login_data = login_resp.json() if login_resp.status_code == 200 else {}
+				if login_data.get('code') != 0:
+					err = login_data.get('msg', f'HTTP {login_resp.status_code}')
+					log.failed(f'{account_name}: 登录失败 - {err}')
+					return False
+			except Exception as e:
+				log.failed(f'{account_name}: 登录请求失败: {e}')
+				return False
+			log.detail(f'{account_name}: 登录成功')
+			return True
 
-		# ---- 3. 登录后查用户信息（含签到状态 + 积分）----
-		info_before = _get_user_info(client)
-		credits_before = _extract_credits(info_before)
-		already_checked = bool(info_before.get('checkin')) if info_before else False
+		def fetch_user_info() -> dict:
+			"""查积分与签到状态；查询失败时仍返回成功形态（quota=0），不阻塞签到。"""
+			info = _get_user_info(client)
+			credits = _extract_credits(info)
+			idx = min(state['calls'], 1)
+			state['raw'][idx] = info
+			state['credits'][idx] = credits
+			state['calls'] += 1
+			if idx == 0:
+				checked = bool(info.get('checkin')) if info else False
+				log.detail(f'{account_name}: 签到前积分={credits}, 已签到={checked}')
+			else:
+				log.detail(f'{account_name}: 签到后积分={credits}')
+			return _credits_info(credits)
 
-		log.detail(f'{account_name}: 签到前积分={credits_before}, 已签到={already_checked}')
+		def already_checked_via_info(_before: dict) -> bool:
+			"""GPTGod 幂等预判：用户信息自带签到状态，已签到则跳过签到请求。"""
+			first = state['raw'][0]
+			return bool(first.get('checkin')) if first else False
 
-		user_info_before = _credits_info(credits_before)
-		log.info(f'{account_name}: {user_info_before["display"]}')
+		def perform_checkin() -> tuple[bool, str | None]:
+			"""register-config → 解密 → 提取参数 → 指纹 → 签名 → 签到（gptgod 专有 _jztz 协议）。"""
+			try:
+				cfg_resp = request_with_retry(client, 'GET', f'{BASE}/api/user/register-config', timeout=30)
+				cfg_data = cfg_resp.json() if cfg_resp.status_code == 200 else {}
+				cfg = cfg_data.get('data', {})
+				_e, _k, _n = cfg['_e'], cfg['_k'], cfg['_n']
+			except Exception as e:
+				return False, f'获取注册配置失败: {e}'
 
-		if already_checked:
-			log.detail(f'{account_name}: 今日已签到')
-			return True, user_info_before, dict(user_info_before)
+			try:
+				js_code = wa_decrypt(_e, _k)
+			except Exception as e:
+				return False, f'解密失败: {e}'
 
-		# ---- 4. 获取 register-config ----
-		try:
-			cfg_resp = request_with_retry(client, 'GET', f'{BASE}/api/user/register-config', timeout=30)
-			cfg_data = cfg_resp.json() if cfg_resp.status_code == 200 else {}
-			cfg = cfg_data.get('data', {})
-			_e, _k, _n = cfg['_e'], cfg['_k'], cfg['_n']
-		except Exception as e:
-			log.failed(f'{account_name}: 获取注册配置失败: {e}')
-			return False, user_info_before, None
+			params = extract_sign_params(js_code)
+			if not params:
+				return False, '提取签名参数失败'
+			py, mc = params
 
-		# ---- 5. 解密并提取签名参数 ----
-		try:
-			js_code = wa_decrypt(_e, _k)
-		except Exception as e:
-			log.failed(f'{account_name}: 解密失败: {e}')
-			return False, user_info_before, None
+			fingerprint = build_fake_fingerprint()
+			try:
+				_jztz = generate_jztz(fingerprint, py, mc)
+			except Exception as e:
+				return False, f'生成 _jztz 签名失败: {e}'
 
-		params = extract_sign_params(js_code)
-		if not params:
-			log.failed(f'{account_name}: 提取签名参数失败')
-			return False, user_info_before, None
-		py, mc = params
-
-		# ---- 6. 生成 _jztz 并签到 ----
-		fingerprint = build_fake_fingerprint()
-		try:
-			_jztz = generate_jztz(fingerprint, py, mc)
-		except Exception as e:
-			log.failed(f'{account_name}: 生成 _jztz 签名失败: {e}')
-			return False, user_info_before, None
-
-		try:
 			checkin_resp = request_with_retry(
 				client,
 				'POST',
@@ -316,23 +312,14 @@ def gptgod_checkin(
 			)
 			checkin_data = checkin_resp.json() if checkin_resp.status_code == 200 else {}
 			if checkin_data.get('code') != 0:
-				err = checkin_data.get('msg', f'HTTP {checkin_resp.status_code}')
-				log.failed(f'{account_name}: 签到失败 - {err}')
-				return False, user_info_before, None
-		except Exception as e:
-			log.failed(f'{account_name}: 签到请求失败: {e}')
-			return False, user_info_before, None
+				return False, checkin_data.get('msg', f'HTTP {checkin_resp.status_code}')
+			return True, None
 
-		log.detail(f'{account_name}: 签到 API 请求成功')
-
-		# ---- 7. 等待后端落库，再查积分 ----
-		time.sleep(3)
-		info_after = _get_user_info(client)
-		credits_after = _extract_credits(info_after)
-		log.detail(f'{account_name}: 签到后积分={credits_after}')
-
-		# ---- 8. 校验积分是否真正增加（反爬假成功检测）----
-		if credits_before is not None and credits_after is not None:
+		def post_checkin(_before: dict, _after: dict) -> None:
+			"""积分防假成功校验（任一次查询失败则跳过，与原实现一致）。"""
+			credits_before, credits_after = state['credits']
+			if credits_before is None or credits_after is None:
+				return
 			diff = credits_after - credits_before
 			if diff > 0:
 				log.detail(f'{account_name}: 积分增加 {diff}，签到确认成功！')
@@ -341,7 +328,15 @@ def gptgod_checkin(
 			else:
 				log.warn(f'{account_name}: 积分减少（{credits_before} -> {credits_after}）')
 
-		return True, user_info_before, _credits_info(credits_after)
-
+		return run_standard_checkin(
+			account_name,
+			unit='credits',
+			authenticate=authenticate,
+			fetch_user_info=fetch_user_info,
+			already_checked_via_info=already_checked_via_info,
+			perform_checkin=perform_checkin,
+			post_checkin=post_checkin,
+			success_detail='签到 API 请求成功',
+		)
 	finally:
 		client.close()

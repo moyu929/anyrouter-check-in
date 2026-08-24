@@ -42,10 +42,15 @@ from utils.browser import (
 	verify_browser_login,
 	wait_for_waf_ready,
 )
+from utils.checkin_core import build_user_info, is_already_checked, quota_to_currency
+from utils.checkin_core import format_amount as _format_amount
 from utils.config import AccountConfig, AppConfig, load_accounts_config
 from utils.debug import is_debug_enabled, log
 from utils.gptgod import gptgod_checkin
-from utils.http_client import API_HEADERS, QUOTA_PER_DOLLAR, RetryExhaustedError, create_client, request_with_retry
+from utils.guyscode import guyscode_checkin
+from utils.http_client import API_HEADERS, RetryExhaustedError, create_client, request_with_retry
+from utils.newapi_jwt import newapi_jwt_checkin
+from utils.newapi_session import newapi_session_checkin
 from utils.notify import notify
 from utils.proxy import get_playwright_proxy, is_proxy_configured, needs_proxy, redact_proxy_url
 from utils.proxy_selector import NodeSelector, available, current_proxy_node, no_available_node
@@ -497,14 +502,11 @@ def get_user_info(client, headers, user_info_url: str, *, propagate_network_erro
 			data = response.json()
 			if data.get('success'):
 				user_data = data.get('data', {})
-				quota = round(user_data.get('quota', 0) / QUOTA_PER_DOLLAR, 2)
-				used_quota = round(user_data.get('used_quota', 0) / QUOTA_PER_DOLLAR, 2)
-				return {
-					'success': True,
-					'quota': quota,
-					'used_quota': used_quota,
-					'display': f'💰 当前余额: ${quota}, 已用: ${used_quota}',
-				}
+				# 无 unit 形态（主流程旧契约，通知层按美元渲染）
+				return build_user_info(
+					quota_to_currency(user_data.get('quota', 0)),
+					quota_to_currency(user_data.get('used_quota', 0)),
+				)
 		return {'success': False, 'error': f'获取用户信息失败: HTTP {response.status_code}'}
 	except ProxyNodeIssue:
 		raise
@@ -524,15 +526,11 @@ def get_user_info(client, headers, user_info_url: str, *, propagate_network_erro
 
 def _user_info_from_profile(profile: dict, unit: str = 'usd') -> dict:
 	"""把浏览器取到的 user/self profile 转成统一的用户信息 dict。"""
-	quota = round(profile.get('quota', 0) / QUOTA_PER_DOLLAR, 2)
-	used = round(profile.get('used_quota', 0) / QUOTA_PER_DOLLAR, 2)
-	return {
-		'success': True,
-		'quota': quota,
-		'used_quota': used,
-		'unit': unit,
-		'display': f'💰 当前余额: ${quota}, 已用: ${used}',
-	}
+	return build_user_info(
+		quota_to_currency(profile.get('quota', 0)),
+		quota_to_currency(profile.get('used_quota', 0)),
+		unit,
+	)
 
 
 def _fetch_user_info_via_browser_sync(
@@ -574,11 +572,15 @@ def _get_user_info_resilient(
 	*,
 	use_proxy: bool,
 	browser_cache: dict,
+	propagate_network_error: bool = True,
 ) -> dict:
 	"""httpx 取用户信息；被阿里云 WAF 挑战时改用真浏览器兜底。
 
 	proxy_node_issue 由 get_user_info 在识别到 WAF 拦截页时抛出。此处捕获后
-	先尝试浏览器兜底取余额；若浏览器也失败，则继续向上抛，交由外层切换节点重试。
+	先尝试浏览器兜底取余额；若浏览器也失败，按 propagate_network_error 决定：
+	  True  → 继续向上抛，交由外层切换节点重试（手动签到型默认，签到还没做）
+	  False → 返回失败 dict（自动签到型：登录已触发签到，余额仅为展示，
+	          不值得反复重新登录去拿余额，反而增加风控风险）
 	"""
 	try:
 		return get_user_info(client, headers, user_info_url)
@@ -596,7 +598,9 @@ def _get_user_info_resilient(
 		if browser_cache.get('browser_info'):
 			log.info(f'{account_name}: 浏览器兜底获取余额成功: {browser_cache["browser_info"]["display"]}')
 			return browser_cache['browser_info']
-		raise
+		if propagate_network_error:
+			raise
+		return {'success': False, 'error': f'余额查询失败（WAF/网络异常）: {str(e)[:50]}'}
 
 
 async def prepare_cookies(account_name: str, provider_config, user_cookies: dict) -> dict | None:
@@ -644,8 +648,8 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 				return True
 			else:
 				error_msg = result.get('msg', result.get('message', 'Unknown error'))
-				already_checked_keywords = ['已经签到', '已签到', '重复签到', 'already checked', 'already signed']
-				if any(keyword in error_msg.lower() for keyword in already_checked_keywords):
+				# 幂等判定统一走中枢（关键词表为全项目唯一事实来源）
+				if is_already_checked(error_msg):
 					log.detail(f'{account_name}: 签到 API 返回"今日已签到"')
 					return True
 				log.failed(f'{account_name}: 签到失败 - {error_msg}')
@@ -662,63 +666,63 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 		return False
 
 
-def _format_amount(value: float, unit: str) -> str:
-	"""按单位渲染金额：美元带 $ 前缀，积分保留整数并加后缀。"""
-	if unit == 'credits':
-		return f'{value:g} 积分'
-	return f'${value:.2f}'
-
-
 def format_check_in_notification(detail: dict) -> str:
-	"""格式化签到通知消息"""
+	"""格式化单账号签到通知条目（Markdown，账号名加粗）。
+
+	统一字段：签到前余额 / 签到获得 / 签到后余额 / 累积消耗。
+	场景收敛：
+	  * 正常签到（有奖励）— 四字段全展示；
+	  * 今日已签到（无奖励）— 前后一致不重复，展示当前余额 + 累积消耗；
+	  * 跨日估算（agentrouter/gorouter 登录即签到）— 无真实 before 基线，
+	    展示估算奖励 + 当前余额 + 累积消耗。
+	"""
 	unit = detail.get('unit', 'usd')
 
 	def amount(value: float) -> str:
 		return _format_amount(value, unit)
 
-	# 自动签到型（agentrouter/gorouter）跨日估算：`登录即签到`，单次 before/after
-	# 均为签到后、无真实基线，展示"当前余额 + 跨日估算奖励"即可，避免"前后一致
-	# 却显示签到获得"的矛盾对比。
+	index = detail.get('index')
+	header = f'**{index}. {detail["name"]}**' if index else f'**{detail["name"]}**'
+
+	# 自动签到型跨日估算：单次 before/after 均为签到后，无真实基线
 	if detail.get('cross_day_estimated'):
-		lines = [
-			f'[CHECK-IN] {detail["name"]}',
-			'  ━━━━━━━━━━━━━━━━━━━━',
-			f'  当前余额: {amount(detail["after_quota"])}  |  累计消耗: {amount(detail["after_used"])}',
-		]
+		lines = [f'{header} ✅']
 		if detail['check_in_reward'] != 0:
-			lines.append(f'  签到获得(跨日估算): +{amount(detail["check_in_reward"])}')
+			lines.append(f'签到获得(跨日估算): +{amount(detail["check_in_reward"])}')
+		lines.append(f'当前余额: {amount(detail["after_quota"])}')
+		lines.append(f'累积消耗: {amount(detail["after_used"])}')
 		return '\n'.join(lines)
 
-	lines = [
-		f'[CHECK-IN] {detail["name"]}',
-		'  ━━━━━━━━━━━━━━━━━━━━',
-		'  签到前',
-		f'     余额: {amount(detail["before_quota"])}  |  累计消耗: {amount(detail["before_used"])}',
-		'  签到后',
-		f'     余额: {amount(detail["after_quota"])}  |  累计消耗: {amount(detail["after_used"])}',
-	]
-
-	has_reward = detail['check_in_reward'] != 0
+	# 负奖励（总额减少，罕见）按无奖励处理，避免显示 "+$-0.50" 之类的畸形行
+	has_reward = detail['check_in_reward'] > 0
 	has_usage = detail['usage_increase'] != 0
 
-	if has_reward or has_usage:
-		lines.append('  ━━━━━━━━━━━━━━━━━━━━')
+	if not has_reward and not has_usage:
+		# 今日已签到、余额无变化：前后一致不必重复展示
+		return '\n'.join(
+			[
+				f'{header} ✅ 今日已签到',
+				f'当前余额: {amount(detail["after_quota"])}',
+				f'累积消耗: {amount(detail["after_used"])}',
+			]
+		)
 
-		if not has_reward and has_usage:
-			lines.append('  今日已签到（期间有使用）')
-
-		if has_reward:
-			lines.append(f'  签到获得: +{amount(detail["check_in_reward"])}')
-
-		if has_usage:
-			lines.append(f'  期间消耗: {amount(detail["usage_increase"])}')
-
-		if detail['balance_change'] != 0:
-			change_symbol = '+' if detail['balance_change'] > 0 else ''
-			lines.append(f'  余额变化: {change_symbol}{amount(detail["balance_change"])}')
+	if has_reward:
+		lines = [
+			f'{header} ✅',
+			f'签到前余额: {amount(detail["before_quota"])}',
+			f'签到获得: +{amount(detail["check_in_reward"])}',
+			f'签到后余额: {amount(detail["after_quota"])}',
+			f'累积消耗: {amount(detail["after_used"])}',
+		]
 	else:
-		lines.extend(['  ━━━━━━━━━━━━━━━━━━━━', '  今日已签到，无变化'])
-
+		# 今日已签到（期间有消耗）：无奖励，仅展示前后余额与累积消耗
+		lines = [
+			f'{header} ✅ 今日已签到（期间有消耗）',
+			f'签到前余额: {amount(detail["before_quota"])}',
+			f'签到后余额: {amount(detail["after_quota"])}',
+			f'累积消耗: {amount(detail["after_used"])}',
+		]
 	return '\n'.join(lines)
 
 
@@ -739,7 +743,7 @@ async def check_in_account(
 	provider_config = app_config.get_provider(account.provider)
 	if not provider_config:
 		log.failed(f'{account_name}: 提供商 "{account.provider}" 未在配置中找到')
-		return False, None, None
+		return False, None, {'success': False, 'error': f'提供商 "{account.provider}" 未在配置中找到'}
 
 	proxy_mode = '走代理' if (provider_config.use_proxy and not force_direct) else '直连'
 	log.info(f'{account_name}: 使用提供商 "{account.provider}" ({provider_config.domain})，{proxy_mode}')
@@ -748,13 +752,60 @@ async def check_in_account(
 	if provider_config.auth_method == 'gptgod':
 		if not account.has_login_credentials():
 			log.failed(f'{account_name}: GPTGod 提供商需要邮箱和密码')
-			return False, None, None
+			return False, None, {'success': False, 'error': 'GPTGod 提供商需要邮箱和密码'}
 		assert account.email is not None and account.password is not None
 		log.info(f'{account_name}: 正在尝试 GPTGod API 签到...')
 		success, info_before, info_after = gptgod_checkin(
 			account_name,
 			account.email,
 			account.password,
+			use_proxy=provider_config.use_proxy and not force_direct,
+		)
+		return success, info_before, info_after
+
+	# Guyscode 独立分支（浏览器登录捕获 JWT + httpx 主动签到）
+	if provider_config.auth_method == 'guyscode':
+		if not account.has_login_credentials():
+			log.failed(f'{account_name}: Guyscode 提供商需要邮箱和密码')
+			return False, None, {'success': False, 'error': 'Guyscode 提供商需要邮箱和密码'}
+		assert account.email is not None and account.password is not None
+		log.info(f'{account_name}: 正在尝试 Guyscode 签到...')
+		success, info_before, info_after = guyscode_checkin(
+			account_name,
+			account.email,
+			account.password,
+			use_proxy=provider_config.use_proxy and not force_direct,
+		)
+		return success, info_before, info_after
+
+	# New-API JWT 纯 API 签到（新版 new-api：登录免 Turnstile，全程 httpx）
+	if provider_config.auth_method == 'newapi_jwt':
+		if not account.has_login_credentials():
+			log.failed(f'{account_name}: {provider_config.name} 提供商需要邮箱和密码')
+			return False, None, {'success': False, 'error': f'{provider_config.name} 提供商需要邮箱和密码'}
+		assert account.email is not None and account.password is not None
+		log.info(f'{account_name}: 正在尝试 {provider_config.name} 纯 API 签到...')
+		success, info_before, info_after = newapi_jwt_checkin(
+			account_name,
+			account.email,
+			account.password,
+			domain=provider_config.domain,
+			use_proxy=provider_config.use_proxy and not force_direct,
+		)
+		return success, info_before, info_after
+
+	# 老版 New-API 纯 API 签到（hcnsec 等：邮箱 API 登录 + session cookie + New-Api-User 头）
+	if provider_config.auth_method == 'newapi_session':
+		if not account.has_login_credentials():
+			log.failed(f'{account_name}: {provider_config.name} 提供商需要邮箱和密码')
+			return False, None, {'success': False, 'error': f'{provider_config.name} 提供商需要邮箱和密码'}
+		assert account.email is not None and account.password is not None
+		log.info(f'{account_name}: 正在尝试 {provider_config.name} 纯 API 签到...')
+		success, info_before, info_after = newapi_session_checkin(
+			account_name,
+			account.email,
+			account.password,
+			domain=provider_config.domain,
 			use_proxy=provider_config.use_proxy and not force_direct,
 		)
 		return success, info_before, info_after
@@ -778,7 +829,7 @@ async def check_in_account(
 			auth_method = 'GitHub OAuth'
 		else:
 			log.failed(f'{account_name}: OAuth 登录失败')
-			return False, None, None
+			return False, None, {'success': False, 'error': 'OAuth 登录失败（详见运行日志）'}
 	elif account.has_login_credentials():
 		log.detail(f'{account_name}: 正在尝试邮箱密码登录 (优先)...')
 		assert account.email is not None and account.password is not None
@@ -795,17 +846,17 @@ async def check_in_account(
 			auth_method = 'email/password'
 		else:
 			log.failed(f'{account_name}: 邮箱密码登录失败，不会使用过期的 session cookies')
-			return False, None, None
+			return False, None, {'success': False, 'error': '邮箱密码登录失败（详见运行日志）'}
 	else:
 		user_cookies = parse_cookies(account.cookies)
 		if not user_cookies:
 			log.failed(f'{account_name}: 配置格式无效')
-			return False, None, None
+			return False, None, {'success': False, 'error': '账号配置格式无效（无有效凭据）'}
 		all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
 		auth_method = 'session cookies'
 
 	if not all_cookies:
-		return False, None, None
+		return False, None, {'success': False, 'error': 'cookies 准备失败（WAF cookies 获取失败，详见运行日志）'}
 
 	log.detail(f'{account_name}: 使用认证方式 -> {auth_method}')
 
@@ -860,6 +911,46 @@ def run_check_in_requests(
 			user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
 			# httpx 取余额；被阿里云 WAF 挑战时用真浏览器兜底（能解 JS 挑战）
 			browser_cache: dict = {}
+
+			if not provider_config.needs_manual_check_in():
+				# 自动签到型（agentrouter/gorouter）：走到这里意味着登录已成功，
+				# 服务端签到已随登录触发完成。余额查询仅为展示（WAF/网络失败时先
+				# 浏览器兜底），失败不判签到失败、也不切节点重新登录——反复 OAuth
+				# 登录同一账号只会增加 WAF/风控风险，重试工作流也无需再补签。
+				user_info_before = _get_user_info_resilient(
+					client,
+					headers,
+					user_info_url,
+					account_name,
+					account,
+					provider_config,
+					all_cookies,
+					use_proxy=use_proxy,
+					browser_cache=browser_cache,
+					propagate_network_error=False,
+				)
+				if user_info_before.get('success'):
+					log.info(f'{account_name}: {user_info_before["display"]}')
+				else:
+					log.warn(f'{account_name}: {user_info_before.get("error", "未知错误")}（签到已随登录完成）')
+				user_info_after = _get_user_info_resilient(
+					client,
+					headers,
+					user_info_url,
+					account_name,
+					account,
+					provider_config,
+					all_cookies,
+					use_proxy=use_proxy,
+					browser_cache=browser_cache,
+					propagate_network_error=False,
+				)
+				if user_info_after.get('success'):
+					log.detail(f'{account_name}: 签到自动完成（由用户信息请求触发）')
+				else:
+					log.warn(f'{account_name}: 签到后余额查询失败: {user_info_after.get("error", "未知错误")}')
+				return True, user_info_before, user_info_after
+
 			user_info_before = _get_user_info_resilient(
 				client,
 				headers,
@@ -876,29 +967,10 @@ def run_check_in_requests(
 			elif user_info_before:
 				log.failed(f'{account_name}: {user_info_before.get("error", "未知错误")}')
 
-			if provider_config.needs_manual_check_in():
-				success = execute_check_in(client, account_name, provider_config, headers)
-				# 签到已发出，查询余额的网络异常不再触发节点重试，避免已成功的签到被重复提交
-				user_info_after = get_user_info(client, headers, user_info_url, propagate_network_error=False)
-				return success, user_info_before, user_info_after
-
-			user_info_after = _get_user_info_resilient(
-				client,
-				headers,
-				user_info_url,
-				account_name,
-				account,
-				provider_config,
-				all_cookies,
-				use_proxy=use_proxy,
-				browser_cache=browser_cache,
-			)
-			if user_info_after and user_info_after.get('success'):
-				log.detail(f'{account_name}: 签到自动完成（由用户信息请求触发）')
-				return True, user_info_before, user_info_after
-			error = user_info_after.get('error', 'Unknown error') if user_info_after else 'Unknown error'
-			log.failed(f'{account_name}: 自动签到失败 - {error}')
-			return False, user_info_before, user_info_after
+			success = execute_check_in(client, account_name, provider_config, headers)
+			# 签到已发出，查询余额的网络异常不再触发节点重试，避免已成功的签到被重复提交
+			user_info_after = get_user_info(client, headers, user_info_url, propagate_network_error=False)
+			return success, user_info_before, user_info_after
 
 	except ProxyNodeIssue:
 		# 让代理节点问题（含阿里云 WAF 拦截）继续向上，交由 check_in_account_with_retry 切换节点重试
@@ -908,7 +980,7 @@ def run_check_in_requests(
 		raise ProxyNodeIssue(f'{account_name}: 签到请求网络异常: {str(e)[:50]}') from e
 	except Exception as e:
 		log.failed(f'{account_name}: 签到过程中发生错误 - {str(e)[:50]}...')
-		return False, None, None
+		return False, None, {'success': False, 'error': f'签到过程异常: {str(e)[:50]}'}
 
 
 async def check_in_account_with_retry(
@@ -946,7 +1018,7 @@ async def check_in_account_with_retry(
 			attempt += 1
 			if attempt > max_retries:
 				log.warn(f'{account_name}: 节点重试已达上限（{max_retries} 次），放弃该账号')
-				return False, None, None
+				return False, None, {'success': False, 'error': f'节点重试耗尽（WAF 拦截/网络异常）: {str(e)[:50]}'}
 
 			current = current_proxy_node()
 			if current:
@@ -1039,9 +1111,7 @@ async def main():
 		try:
 			if is_retry:
 				# 补签：单次尝试，不做节点切换多次重试
-				success, user_info_before, user_info_after = await check_in_account(
-					account, i, app_config
-				)
+				success, user_info_before, user_info_after = await check_in_account(account, i, app_config)
 			else:
 				success, user_info_before, user_info_after = await check_in_account_with_retry(
 					account, i, app_config, node_selector
@@ -1058,6 +1128,16 @@ async def main():
 				account_name = account.get_display_name(i)
 				log.notify(f'{account_name} 失败，将发送通知')
 
+			elif user_info_after is None or not user_info_after.get('success'):
+				# 签到成功但余额查询失败（如自动签到型遇 WAF）：账号不会出现在
+				# 明细与失败条目中，这里补一条成功条目，避免通知里凭空消失
+				reason = user_info_after.get('error', '未知原因') if user_info_after else '未获取到用户信息'
+				notification_content.append(
+					(i, f'**{i + 1}. {account_name}** ✅ 签到成功\n余额未获取: {str(reason)[:60]}')
+				)
+				notified_account_keys.add(account_key)
+				need_notify = True  # 余额状态变化（未知）也值得通知一次
+
 			if user_info_after and user_info_after.get('success'):
 				current_quota = user_info_after['quota']
 				current_used = user_info_after['used_quota']
@@ -1071,6 +1151,12 @@ async def main():
 
 					total_before = before_quota + before_used
 					total_after = after_quota + after_used
+				else:
+					# 签到前查询失败但签到后成功：无 before 可对比，按 0 变化记账，
+					# 避免沿用上一账号旧值跨账号串值 / 首个账号 NameError
+					before_quota = after_quota = user_info_after['quota']
+					before_used = after_used = user_info_after['used_quota']
+					total_before = total_after = before_quota + before_used
 
 				check_in_reward = total_after - total_before
 				usage_increase = after_used - before_used
@@ -1090,6 +1176,7 @@ async def main():
 
 				account_check_in_details[account_key] = {
 					'name': account.get_display_name(i),
+					'index': i + 1,
 					'unit': user_info_after.get('unit', 'usd'),
 					'before_quota': before_quota,
 					'before_used': before_used,
@@ -1125,22 +1212,25 @@ async def main():
 
 			if should_notify_this_account:
 				account_name = account.get_display_name(i)
-				status = '[成功]' if success else '[失败]'
-				account_result = f'{status} {account_name}'
-				if user_info_after and user_info_after.get('success'):
-					account_result += f'\n{user_info_after["display"]}'
-				elif user_info_after:
-					account_result += f'\n{user_info_after.get("error", "Unknown error")}'
-				notification_content.append(account_result)
+				# 失败条目：序号 + 原因（+最后已知余额，如有）
+				entry_lines = [f'**{i + 1}. {account_name}** ❌']
+				if user_info_after:
+					if user_info_after.get('success'):
+						entry_lines.append(f'当前余额: {user_info_after["display"]}')
+					else:
+						entry_lines.append(f'失败原因: {user_info_after.get("error", "未知错误")}')
+				else:
+					entry_lines.append('失败原因: 未知（详见运行日志）')
+				notification_content.append((i, '\n'.join(entry_lines)))
 				notified_account_keys.add(account_key)
 
 		except Exception as e:
 			account_name = account.get_display_name(i)
-			log.failed(f'{account_name} 处理异常: {e}')
+			log.failed(f'{account_name}: 处理异常: {e}')
 			need_notify = True
 			if i not in failed_indexes:
 				failed_indexes.append(i)
-			notification_content.append(f'[失败] {account_name} 异常: {str(e)[:50]}...')
+			notification_content.append((i, f'**{i + 1}. {account_name}** ❌\n失败原因: 处理异常: {str(e)[:50]}'))
 			notified_account_keys.add(account_key)
 
 	current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
@@ -1161,7 +1251,7 @@ async def main():
 			account_key = f'account_{i + 1}'
 			# 按 account_key 精确判重，避免"账号1"被"账号11"的条目误判为已通知
 			if account_key in account_check_in_details and account_key not in notified_account_keys:
-				notification_content.append(format_check_in_notification(account_check_in_details[account_key]))
+				notification_content.append((i, format_check_in_notification(account_check_in_details[account_key])))
 				notified_account_keys.add(account_key)
 
 	if current_balance_hash:
@@ -1187,21 +1277,22 @@ async def main():
 
 	if need_notify and notification_content:
 		summary = [
-			'[统计] 签到结果统计:',
-			f'[成功] 成功: {success_count}/{total_count}',
-			f'[失败] 失败: {total_count - success_count}/{total_count}',
+			'**📊 统计**',
+			f'成功: {success_count}/{total_count}，失败: {total_count - success_count}/{total_count}',
 		]
 
 		if success_count == total_count:
-			summary.append('[成功] 全部账号签到成功!')
+			summary.append('全部账号签到成功 ✅')
 		elif success_count > 0:
-			summary.append('[警告] 部分账号签到成功')
+			summary.append('部分账号签到成功 ⚠️')
 		else:
-			summary.append('[错误] 全部账号签到失败')
+			summary.append('全部账号签到失败 ❌')
 
-		time_info = f'[时间] 执行时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
+		time_info = f'执行时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
 
-		notify_content = '\n\n'.join([time_info, '\n'.join(notification_content), '\n'.join(summary)])
+		# 条目按账号序号排序后拼接，账号与数据一一对应
+		entries = [entry for _, entry in sorted(notification_content, key=lambda item: item[0])]
+		notify_content = '\n\n'.join([time_info, *entries, '\n'.join(summary)])
 		screenshot_paths = take_pending_screenshots() if is_debug_enabled() else []
 		if screenshot_paths:
 			github_run_id = os.getenv('GITHUB_RUN_ID', '').strip()
@@ -1219,7 +1310,10 @@ async def main():
 			notify_title = f'签到重试完成，成功 {success_count}，失败 {total_count - success_count}'
 		else:
 			notify_title = f'每日签到完成，成功 {success_count}，失败 {total_count - success_count}'
-		if notify.push_message(notify_title, notify_content, msg_type='text'):
+		# Markdown 正文（NotifyX/飞书等直接渲染；纯文本渠道由 notify 层降级）
+		if notify.push_message(
+			notify_title, notify_content, msg_type='markdown', description=f'成功 {success_count}/{total_count}'
+		):
 			log.notify('通知已发送')
 	elif need_notify:
 		log.warn('有失败或余额变化，但缺少通知内容，未发送通知')

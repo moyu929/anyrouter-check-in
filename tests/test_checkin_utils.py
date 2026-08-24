@@ -143,12 +143,11 @@ class TestFormatCheckInNotification:
 
 	def test_happy_path_includes_reward_and_usage(self):
 		text = format_check_in_notification(self._base_detail())
-		assert '[CHECK-IN] 账号A' in text
-		assert '余额: $10.00' in text  # before
-		assert '余额: $10.50' in text  # after
+		assert '**账号A**' in text
+		assert '签到前余额: $10.00' in text
+		assert '签到后余额: $10.50' in text
 		assert '签到获得: +$0.50' in text
-		assert '期间消耗: $0.20' in text
-		assert '余额变化: +$0.30' in text
+		assert '累积消耗: $1.20' in text
 
 	def test_already_checked_no_change(self):
 		detail = self._base_detail(
@@ -159,8 +158,9 @@ class TestFormatCheckInNotification:
 			balance_change=0,
 		)
 		text = format_check_in_notification(detail)
-		assert '今日已签到，无变化' in text
+		assert '今日已签到' in text
 		assert '签到获得' not in text
+		assert '当前余额: $10.00' in text
 
 	def test_used_only_without_reward(self):
 		detail = self._base_detail(
@@ -171,8 +171,10 @@ class TestFormatCheckInNotification:
 			balance_change=-0.2,
 		)
 		text = format_check_in_notification(detail)
-		assert '今日已签到（期间有使用）' in text
+		assert '今日已签到（期间有消耗）' in text
 		assert '签到获得' not in text
+		assert '签到前余额: $10.00' in text
+		assert '签到后余额: $9.80' in text
 
 	def test_credits_unit_applied(self):
 		detail = self._base_detail(unit='credits', before_quota=500, check_in_reward=100)
@@ -180,11 +182,11 @@ class TestFormatCheckInNotification:
 		assert '500 积分' in text
 		assert '+100 积分' in text
 
-	def test_negative_balance_change_shows_minus(self):
-		detail = self._base_detail(balance_change=-0.5)
+	def test_negative_reward_omitted_when_no_change(self):
+		# 负奖励（余额减少）按无奖励分支处理，不显示"签到获得"负数行
+		detail = self._base_detail(check_in_reward=-0.5, usage_increase=0)
 		text = format_check_in_notification(detail)
-		# _format_amount 渲染负数时会先 format("-0.50") → "$-0.50"，符号在 $ 后
-		assert '余额变化: $-0.50' in text
+		assert '签到获得' not in text
 
 
 # ============================================================
@@ -474,6 +476,8 @@ class TestRunCheckInRequests:
 		assert after and after['success'] is True
 
 	def test_auto_check_in_user_info_failure(self, monkeypatch):
+		"""自动签到型：登录成功即签到完成，余额查询 401 仅影响展示，不判签到失败。"""
+
 		def user_info_handler(req):
 			return httpx.Response(401, json={'success': False})
 
@@ -489,7 +493,38 @@ class TestRunCheckInRequests:
 			provider,
 		)
 
-		assert ok is False
+		assert ok is True  # 签到已随登录完成
+		assert before and before['success'] is False
+		assert after and after['success'] is False
+
+	def test_auto_check_in_waf_block_does_not_raise(self, monkeypatch):
+		"""自动签到型：余额查询被 WAF 拦截且浏览器兜底失败 → 不抛 ProxyNodeIssue
+		（不切节点重新登录），返回成功 + 失败 dict（余额未知）。"""
+		from checkin import ProxyNodeIssue
+
+		def waf_handler(req):
+			return httpx.Response(200, text='<html>aliyun_waf_aa challenge</html>')
+
+		self._install_handler(monkeypatch, {'/api/user/self': waf_handler})
+		# 浏览器兜底失败（返回 None）
+		monkeypatch.setattr(checkin_module, '_fetch_user_info_via_browser_sync', lambda *a, **kw: None)
+
+		provider = _FakeProvider(sign_in_path=None)
+		provider.__dict__['needs_manual_check_in'] = lambda: False
+
+		try:
+			ok, before, after = run_check_in_requests(
+				{'session': 'abc'},
+				self._account(),
+				'AccW',
+				provider,
+			)
+		except ProxyNodeIssue:
+			pytest.fail('自动签到型余额查询失败不应抛 ProxyNodeIssue 触发重新登录')
+
+		assert ok is True
+		assert before and before['success'] is False and 'WAF' in before['error']
+		assert after and after['success'] is False
 
 	def test_api_user_key_header_is_set(self, monkeypatch):
 		captured_headers = {}
@@ -569,7 +604,7 @@ class TestRunCheckInRequestsNetworkErrors:
 
 		assert ok is False
 		assert before is None
-		assert after is None
+		assert after['error'] == '签到过程异常: factory boom'
 
 
 # ============================================================
@@ -621,7 +656,7 @@ class TestCheckInAccount:
 		ok, before, after = self._run(check_in_account(acc, 0, app))
 		assert ok is False
 		assert before is None
-		assert after is None
+		assert after['error'] == '提供商 "bogus" 未在配置中找到'
 
 	# ----------------------------------------------------- 分支 2：gptgod（有凭据 → 成功）
 	def test_gptgod_with_credentials_dispatches_to_gptgod_checkin(self, monkeypatch):
@@ -656,7 +691,7 @@ class TestCheckInAccount:
 		ok, before, after = self._run(check_in_account(acc, 0, app))
 		assert ok is False
 		assert before is None
-		assert after is None
+		assert after['error'] == 'GPTGod 提供商需要邮箱和密码'
 
 	# ----------------------------------------------------- 分支 4：OAuth 成功
 	def test_github_oauth_success_runs_requests(self, monkeypatch):
@@ -701,7 +736,7 @@ class TestCheckInAccount:
 		ok, before, after = self._run(check_in_account(acc, 0, app))
 		assert ok is False
 		assert before is None
-		assert after is None
+		assert after['error'] == 'OAuth 登录失败（详见运行日志）'
 
 	# ----------------------------------------------------- 分支 6：邮箱密码登录成功
 	def test_credentials_login_success_runs_requests(self, monkeypatch):
@@ -740,7 +775,7 @@ class TestCheckInAccount:
 		ok, before, after = self._run(check_in_account(acc, 0, app))
 		assert ok is False
 		assert before is None
-		assert after is None
+		assert after['error'] == '邮箱密码登录失败（详见运行日志）'
 
 	# ----------------------------------------------------- 分支 8：cookies 分支但 cookies 空
 	def test_session_cookies_empty_dict_fails(self, monkeypatch):
@@ -751,7 +786,7 @@ class TestCheckInAccount:
 		ok, before, after = self._run(check_in_account(acc, 0, app))
 		assert ok is False
 		assert before is None
-		assert after is None
+		assert after['error'] == '账号配置格式无效（无有效凭据）'
 
 	# ----------------------------------------------------- 分支 9：prepare_cookies 返回 None → 失败
 	def test_prepare_cookies_none_fails(self, monkeypatch):
@@ -767,7 +802,7 @@ class TestCheckInAccount:
 		ok, before, after = self._run(check_in_account(acc, 0, app))
 		assert ok is False
 		assert before is None
-		assert after is None
+		assert after['error'] == 'cookies 准备失败（WAF cookies 获取失败，详见运行日志）'
 
 	# ----------------------------------------------------- 分支 10：纯 cookies 路径成功
 	def test_session_cookies_success_runs_requests(self, monkeypatch):

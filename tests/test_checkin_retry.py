@@ -140,7 +140,9 @@ class TestRetryDispatch:
 
 		result = await check_in_account_with_retry(_account(), 0, _app_config(), selector)
 
-		assert result == (False, None, None)
+		assert result[0] is False
+		assert result[1] is None
+		assert result[2]['error'].startswith('节点重试耗尽')
 		# 初始 + 2 次重试 = 3 次尝试
 		assert _always_issue.calls == 3
 		assert selector.select_calls == 2

@@ -25,7 +25,7 @@ class ProviderConfig:
 	waf_cookie_names: List[str] | None = None
 	use_proxy: bool = False
 	persist_profile: bool = False
-	auth_method: Literal['email', 'oauth', 'gptgod'] | None = None
+	auth_method: Literal['email', 'oauth', 'gptgod', 'guyscode', 'newapi_jwt', 'newapi_session'] | None = None
 	oauth_client_id: str | None = None
 	oauth_state_path: str = '/api/oauth/state'
 	oauth_callback_path: str = '/api/oauth/github'
@@ -163,6 +163,53 @@ class AppConfig:
 				api_user_key=None,
 				auth_method='gptgod',
 			),
+			'guyscode': ProviderConfig(
+				name='guyscode',
+				domain='https://www.guyscode.com',
+				login_path='/login',
+				# guyscode 不走通用的 cookie/sign_in 流程，由独立分支 guyscode_checkin 处理
+				sign_in_path=None,
+				user_info_path='/api/v1/auth/me',
+				api_user_key=None,
+				auth_method='guyscode',
+				use_proxy=False,
+				persist_profile=False,
+			),
+			'nianhua': ProviderConfig(
+				name='nianhua',
+				domain='https://us-3.nianhuaapi.com',
+				login_path='/login',
+				# 新版 new-api（JWT Bearer）由独立分支 newapi_jwt_checkin 处理
+				sign_in_path='/api/user/checkin',
+				user_info_path='/api/user/self',
+				api_user_key=None,
+				auth_method='newapi_jwt',
+				use_proxy=False,
+				persist_profile=False,
+			),
+			'superapi': ProviderConfig(
+				name='superapi',
+				domain='https://superapi.buzz',
+				login_path='/login',
+				sign_in_path='/api/user/checkin',
+				user_info_path='/api/user/self',
+				api_user_key=None,
+				auth_method='newapi_jwt',
+				use_proxy=False,
+				persist_profile=False,
+			),
+			'hcnsec': ProviderConfig(
+				name='hcnsec',
+				domain='https://api.hcnsec.cn',
+				login_path='/login',
+				# 老版 new-api（邮箱 API 登录 + session cookie + New-Api-User 头）由独立分支处理
+				sign_in_path='/api/user/checkin',
+				user_info_path='/api/user/self',
+				api_user_key='new-api-user',
+				auth_method='newapi_session',
+				use_proxy=False,
+				persist_profile=False,
+			),
 		}
 
 		# 尝试从环境变量加载自定义 providers
@@ -175,12 +222,33 @@ class AppConfig:
 					log.warn('PROVIDERS 必须是 JSON 对象，已忽略自定义提供商')
 					return cls(providers=providers)
 
-				# 解析自定义 providers,会覆盖默认配置
+				# 通配符 "*"：声明的字段统一应用到全部提供商（一键全代理/全直连）。
+				# 优先级：内置默认 < "*" 通配 < 具体提供商条目（后解析覆盖）。
+				wildcard_data = providers_data.pop('*', None)
+				if wildcard_data is not None and not isinstance(wildcard_data, dict):
+					log.warn('PROVIDERS 的 "*" 通配配置必须是 JSON 对象，已忽略')
+					wildcard_data = None
+
+				if wildcard_data:
+					mentioned = set(providers_data.keys())
+					applied = 0
+					for name, provider in providers.items():
+						if name in mentioned:
+							continue
+						try:
+							providers[name] = ProviderConfig.from_dict(name, wildcard_data, defaults=provider)
+							applied += 1
+						except Exception as e:
+							log.warn(f'应用通配符配置 "*" 到 "{name}" 失败: {e}')
+					log.detail(f'通配符配置 "*" 已应用到 {applied} 个内置提供商')
+
+				# 解析具体提供商条目（通配符字段先铺底，具体字段覆盖），会覆盖默认配置
 				for name, provider_data in providers_data.items():
 					try:
+						merged = {**wildcard_data, **provider_data} if wildcard_data else provider_data
 						providers[name] = ProviderConfig.from_dict(
 							name,
-							provider_data,
+							merged,
 							defaults=providers.get(name),
 						)
 					except Exception as e:

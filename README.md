@@ -8,7 +8,7 @@
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![License](https://img.shields.io/github/license/moyu929/anyrouter-check-in)](LICENSE)
 
-多平台多账号自动签到，支持 **NewAPI** / **OneAPI** 架构平台，内置 `anyrouter`、`agentrouter`、`gptgod` 三个签到分支，其它平台可自定义配置。
+多平台多账号自动签到，支持 **NewAPI** / **OneAPI** 架构平台，内置 `agentrouter`、`gorouter`、`gptgod`、`lyclaude`、`nianhua`、`superapi`、`hcnsec`、`guyscode` 等签到分支，其它平台可自定义配置。
 
 **维护开源不易，如果本项目帮助到了你，请帮忙点个 Star，谢谢！**
 
@@ -21,14 +21,18 @@
 | 路径                            | 职责                                                                                |
 | ------------------------------- | ----------------------------------------------------------------------------------- |
 | `checkin.py`                    | 入口与编排：加载配置 → 逐账号登录/签到 → 汇总余额变化 → 推送通知 → 决定退出码       |
+| `utils/checkin_core.py`         | **签到中枢**：幂等判定、余额换算、用户信息构造、new-api 共享协议、标准签到流程编排  |
 | `utils/config.py`               | `ProviderConfig` / `AccountConfig` 数据类，解析 `PROVIDERS` 与 `ANYROUTER_ACCOUNTS` |
 | `utils/http_client.py`          | 统一 httpx 客户端工厂（UA、Client Hints、HTTP/2、代理）与指数退避重试               |
 | `utils/browser.py`              | CloakBrowser 启动、登录页导航、邮箱表单填写、登录态判定、调试截图                   |
 | `utils/popups.py`               | 关闭站点公告弹窗（Playwright 定位 + JS 兜底），并保护登录表单不被误关               |
 | `utils/proxy.py`                | 按提供商 `use_proxy` 读取代理、连通性探测与直连回退                                 |
 | `utils/proxy_selector.py`       | mihomo REST API 节点选择器：按区域优先级选最低延迟可用节点，维护全局排除集合        |
-| `utils/gptgod.py`               | GPTGod 纯 API 分支：`_jztz` 签名算法与设备指纹持久化                                |
-| `utils/notify.py`               | 9 个通知渠道，逐个独立发送、互不阻塞                                                |
+| `utils/gptgod.py`               | GPTGod 纯 API 分支：`_jztz` 签名算法（仅保留差异逻辑，流程由中枢编排）              |
+| `utils/newapi_jwt.py`           | 新版 New-API 站点纯 API 分支（JWT Bearer 认证）                                     |
+| `utils/newapi_session.py`       | 老版 New-API 站点纯 API 分支（session cookie + `New-Api-User` 头，支持 CNY 汇率）  |
+| `utils/guyscode.py`             | Guyscode 分支：refresh_token 续期 + 浏览器登录捕获 JWT（已搁置，见 2.5）            |
+| `utils/notify.py`               | 10 个通知渠道，逐个独立发送、互不阻塞；支持 Markdown 正文与渠道自动适配             |
 | `utils/debug.py`                | 统一日志前缀与 `DEBUG_MODE` 开关                                                    |
 | `scripts/setup_mihomo_proxy.sh` | CI 内下载 mihomo、生成配置（含 REST API）、启动本地代理并探测节点                  |
 
@@ -37,42 +41,50 @@
 ```
 加载 .env / 环境变量
   ↓
-AppConfig.load_from_env()      内置 3 个提供商 + PROVIDERS 覆盖
+AppConfig.load_from_env()      内置 8 个提供商 + PROVIDERS 覆盖
 load_accounts_config()         ANYROUTER_ACCOUNTS 校验
   ↓
-逐账号 check_in_account()
-  ├─ auth_method == "gptgod"  → utils/gptgod.py 全流程（登录 + 签名 + 签到）
-  ├─ auth_method == "oauth"   → GitHub OAuth 三段式重放（登录即签到）
-  ├─ 配置了 email + password  → 浏览器登录取 cookies → HTTP 签到
-  └─ 仅配置 cookies           → 补 WAF cookies → HTTP 签到
+逐账号 check_in_account()      （use_proxy 账号由 check_in_account_with_retry 包裹节点切换重试）
+  ├─ gptgod / guyscode / newapi_jwt / newapi_session
+  │     → 各自分支模块（仅差异逻辑）→ checkin_core.run_standard_checkin 统一编排
+  ├─ auth_method == "oauth"    → GitHub OAuth 三段式重放（登录即签到）
+  ├─ 配置了 email + password   → 浏览器登录取 cookies → HTTP 签到
+  └─ 仅配置 cookies            → 补 WAF cookies → HTTP 签到
   ↓
-run_check_in_requests()        查余额 → 签到 → 再查余额
+run_check_in_requests()        查余额 → 签到 → 再查余额（WAF 拦截时浏览器兜底）
   ↓
-余额哈希比对（balance_hash.txt）
+余额哈希比对（balance_hash.txt）+ 自动签到型跨日快照（balance_snapshot.json）
   ↓
-失败或余额变化 → notify.push_message() → sys.exit(0/1)
+失败或余额变化 → notify.push_message()（Markdown 正文）→ sys.exit(0/1)
 ```
 
 ### 1.3 签到分支（按逻辑方式划分）
 
 | 逻辑分类                  | 实现路径                                                  | 是否需要浏览器 | 是否需要签名  | 签到触发  | 适用提供商                          |
 | ------------------------- | --------------------------------------------------------- | :------------: | :-----------: | :-------: | ----------------------------------- |
-| **浏览器邮箱登录签到**    | 启动浏览器 → 填写邮箱密码 → 获取 cookies → 手动 POST 签到 |       是       |      否       |   手动    | `anyrouter`（邮箱密码模式）         |
-| **Session cookies 签到**  | 直接使用用户提供的 cookies → 获取 WAF cookies → 签到      | 仅 WAF 绕过时  |      否       | 手动/自动 | `anyrouter`（Session 模式）、自定义 |
-| **GitHub OAuth 重放签到** | 重放 GitHub OAuth 授权流程 → 登录即触发签到               |       否       |      否       |   自动    | `agentrouter`                       |
+| **浏览器邮箱登录签到**    | 启动浏览器 → 填写邮箱密码 → 获取 cookies → 手动 POST 签到 |       是       |      否       |   手动    | `lyclaude`、自定义 NewAPI 站点      |
+| **Session cookies 签到**  | 直接使用用户提供的 cookies → 获取 WAF cookies → 签到      | 仅 WAF 绕过时  |      否       | 手动/自动 | `lyclaude`（Session 模式）、自定义   |
+| **GitHub OAuth 重放签到** | 重放 GitHub OAuth 授权流程 → 登录即触发签到               |       否       |      否       |   自动    | `agentrouter`、`gorouter`           |
 | **纯 API 签名签到**       | API 登录 → 获取签名参数 → 生成 `_jztz` → 签到             |       否       | 是（`_jztz`） |   手动    | `gptgod`                            |
+| **New-API JWT 签到**      | API 登录换 `access_token` → Bearer 请求 → 主动签到        |       否       |      否       |   手动    | `nianhua`、`superapi`               |
+| **New-API Session 签到**  | API 登录种 session cookie + 用户 id 头 → 主动签到         |       否       |      否       |   手动    | `hcnsec`（CNY 汇率显示）            |
 
 ### 1.4 签到分支（按提供商划分）
 
 | 提供商        | 认证方式            | 逻辑分类                      | `use_proxy` 默认值 | 关键特性                                    |
 | ------------- | ------------------- | ----------------------------- | :----------------: | ------------------------------------------- |
-| `anyrouter`   | 邮箱+密码 / Session | 浏览器登录签到 / Session 签到 |      `false`       | NewAPI 标准，WAF 绕过，持久化浏览器 Profile |
 | `agentrouter` | GitHub OAuth        | GitHub OAuth 重放签到         |       `true`       | 无需密码，登录即签到                        |
+| `gorouter`    | GitHub OAuth        | GitHub OAuth 重放签到         |      `false`       | 无需密码，登录即签到                        |
 | `gptgod`      | 邮箱+密码           | 纯 API 签名签到               |      `false`       | 无需浏览器，签名算法反爬，余额单位为积分    |
+| `lyclaude`    | 邮箱+密码 / Session | 浏览器登录签到 / Session 签到 |      `false`       | NewAPI 标准，WAF 绕过                      |
+| `nianhua`     | 邮箱+密码           | New-API JWT 签到              |      `false`       | 新版 new-api（JWT Bearer），余额单位为美元  |
+| `superapi`    | 邮箱+密码           | New-API JWT 签到              |      `false`       | 新版 new-api（JWT Bearer），余额单位为美元  |
+| `hcnsec`      | 邮箱+密码           | New-API Session 签到          |      `false`       | 老版 new-api，余额按实时汇率以人民币显示    |
+| `guyscode`    | 邮箱+密码           | 纯 API 签到（refresh_token）  |      `false`       | **已搁置**：登录被 Turnstile 强门槛阻断，见 2.5 |
 
 > **代理生效范围**：代理按提供商粒度启用。即使已设置 `CHECKIN_PROXY_URL`，`use_proxy=false` 的提供商仍然直连；可通过 `PROVIDERS` 覆盖每个提供商的 `use_proxy`。
 
-> **签到频率**：每天北京时间 9:00 自动执行一次（GitHub Actions 实际延时约 1~1.5h），可随时手动触发。
+> **签到频率**：每天北京时间 9:00 自动执行一次（GitHub Actions 实际延时约 1~1.5h），可随时手动触发。若当日有账号失败，北京时间 16:00 的**重试工作流**会自动补签失败账号一次（单次尝试，不做节点切换重试）。
 
 ---
 
@@ -88,21 +100,16 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
 
 #### 2.2.1 各分支配置格式
 
-| 认证方式     | 适用提供商             | 配置示例                                               | 说明                                   |
-| ------------ | ---------------------- | ------------------------------------------------------ | -------------------------------------- |
-| 邮箱+密码    | `anyrouter` / `gptgod` | `{"email":"user@ex.com","password":"pass"}`            | 推荐，自动获取 cookies 与用户标识      |
-| Session      | `anyrouter`            | `{"cookies":{"session":"xxx"},"api_user":"12345"}`     | 兼容旧版，需手动获取 cookies           |
-| GitHub OAuth | `agentrouter`          | `{"github_session":"your_github_user_session_cookie"}` | 需提供 GitHub 的 `user_session` cookie |
+| 认证方式     | 适用提供商                                                                 | 配置示例                                               | 说明                                   |
+| ------------ | -------------------------------------------------------------------------- | ------------------------------------------------------ | -------------------------------------- |
+| 邮箱+密码    | `gptgod` / `lyclaude` / `nianhua` / `superapi` / `hcnsec` / `guyscode`     | `{"email":"user@ex.com","password":"pass"}`            | 推荐，自动登录                         |
+| Session      | `lyclaude` / 自定义                                                         | `{"cookies":{"session":"xxx"},"api_user":"12345"}`     | 兼容旧版，需手动获取 cookies           |
+| GitHub OAuth | `agentrouter` / `gorouter`                                                  | `{"github_session":"your_github_user_session_cookie"}` | 需提供 GitHub 的 `user_session` cookie |
 
 #### 2.2.2 多账号混合配置示例
 
 ```json
 [
-  {
-    "name": "主账号",
-    "email": "user1@example.com",
-    "password": "pass1"
-  },
   {
     "name": "AgentRouter 账号",
     "provider": "agentrouter",
@@ -111,8 +118,20 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
   {
     "name": "GPTGod 账号",
     "provider": "gptgod",
+    "email": "user2@example.com",
+    "password": "pass2"
+  },
+  {
+    "name": "nianhua 账号",
+    "provider": "nianhua",
     "email": "user3@example.com",
     "password": "pass3"
+  },
+  {
+    "name": "hcnsec 账号",
+    "provider": "hcnsec",
+    "email": "user4@example.com",
+    "password": "pass4"
   }
 ]
 ```
@@ -150,10 +169,19 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
 
 ### 2.4 GPTGod 分支前置条件
 
-`gptgod` 分支不使用浏览器，但依赖两项运行时状态：
+`gptgod` 分支不使用浏览器，签名链路自包含：
 
-- **设备指纹**：首次运行在 `.device_fp/` 下按账号生成，5 天后自动轮换。CI 中该目录已配置缓存；若缓存丢失，指纹会重新生成（可能触发对方风控，属预期行为）。
+- **设备指纹**：内置一份固定的设备身份指纹（所有账号共享），仅单次访问行为参数随机化。长期稳定的指纹更不易被风控识别为异常。
 - **签名参数**：每次运行从 `/api/user/register-config` 实时拉取并解密，无需手动维护。若对方更换算法（重排表长度不再是 33 或 XOR 密钥不再是 16），签到会失败并在日志中提示。
+
+### 2.5 Guyscode 分支（已搁置）
+
+`guyscode` 的签到链路（refresh_token 续期 → 查余额 → 签到）已实现，但其登录接口强制校验 **Cloudflare Turnstile** 人机验证，CloakBrowser 指纹无法通过验证框渲染，自动登录被阻断。若需恢复：
+
+1. 用真人浏览器手动登录一次，导出 `refresh_token` 到 `guyscode_refresh.json`，验证其能否跨天存活；
+2. 可跨天则纯 API 无人值守签到成立（仅需一次手动登录）；否则需接入 Turnstile 代过服务（对免费 API 站不划算）。
+
+**注意**：`guyscode_refresh.json` 含凭据，已在 `.gitignore` 中忽略，勿提交。
 
 ---
 
@@ -196,6 +224,33 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
 ```
 
 > 在仓库 Settings → Environments → `production` → **Environment secrets** 中添加 `PROVIDERS`。
+
+### 3.3 通配符 `*`：一键控制全部提供商代理开关
+
+`PROVIDERS` 支持保留字 `"*"`，其中声明的字段会统一应用到所有内置提供商——最典型的用法是一键全代理或全直连：
+
+```json
+{
+  "*": { "use_proxy": true }
+}
+```
+
+```json
+{
+  "*": { "use_proxy": false }
+}
+```
+
+优先级为 **内置默认 < `"*"` 通配 < 具体提供商条目**。即：通配符覆盖所有内置默认，但具体条目可以再覆盖通配符：
+
+```json
+{
+  "*": { "use_proxy": true },
+  "gptgod": { "use_proxy": false }
+}
+```
+
+上例表示：除 gptgod 直连外，其余提供商全部走代理。工作流的 `NEEDS_PROXY` 判断（是否初始化 mihomo）遵循同一优先级。
 
 ---
 
@@ -317,7 +372,35 @@ run_check_in_requests()        查余额 → 签到 → 再查余额
 
 > **日志说明**：未配置任何渠道时只打印一行 `[通知] 未配置任何通知渠道，跳过推送`；已配置的渠道发送失败会在日志中打印 `[警告] <渠道> 推送失败: ...`。这是预期输出，不代表签到失败——只要有任一通道配置正确并发送成功（`[通知] <渠道> 推送成功`）即可。
 
-> **通知触发条件**：仅在「有账号签到失败」或「检测到余额变化」时推送；全部成功且余额无变化时跳过通知。余额指纹保存在 `balance_hash.txt`（CI 中通过缓存跨运行保留），因此首次运行必定推送一次。
+> **通知触发条件**：仅在「有账号签到失败」「检测到余额变化」或「签到成功但余额未获取」时推送；全部成功且余额无变化时跳过通知。余额指纹保存在 `balance_hash.txt`（CI 中通过缓存跨运行保留），因此首次运行必定推送一次。
+
+#### 6.1 通知正文格式（Markdown）
+
+通知正文为 Markdown 格式，每个账号带序号加粗，字段收敛为「签到前余额 / 签到获得 / 签到后余额 / 累积消耗」，签到失败时显示失败原因：
+
+```
+执行时间: 2026-08-25 09:12:34
+
+**1. gptgod-1** ✅
+签到前余额: 610635 积分
+签到获得: +2000 积分
+签到后余额: 612635 积分
+累积消耗: 0 积分
+
+**2. agentrouter** ✅ 签到成功
+余额未获取: 余额查询失败（WAF/网络异常）: aliyun_waf_aa...
+
+**3. lyclaude** ❌
+失败原因: OAuth 登录失败（详见运行日志）
+
+**📊 统计**
+成功: 2/3，失败: 1/3
+部分账号签到成功 ⚠️
+```
+
+- 已签到且余额无变化的账号只显示「当前余额 + 累积消耗」，不重复展示前后对比
+- 自动签到型（登录即签到）展示「跨日估算奖励 + 当前余额 + 累积消耗」
+- 各渠道自动适配：NotifyX / 飞书直接渲染 Markdown；Telegram 转为 HTML 粗体；钉钉、企业微信、Bark 等纯文本渠道自动去掉 Markdown 标记
 
 > **注意**：若 webhook 有安全要求（如钉钉），可在机器人安全设置中选择**自定义关键词**，填写 `AnyRouter`。
 

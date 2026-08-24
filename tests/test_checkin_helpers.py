@@ -78,9 +78,17 @@ class TestFormatCheckInNotification:
 	def test_renders_usd_amounts(self):
 		text = format_check_in_notification(_detail())
 
-		assert '余额: $100.00' in text
+		assert '**Account 1**' in text
+		assert '签到前余额: $100.00' in text
 		assert '签到获得: +$25.00' in text
+		assert '签到后余额: $125.00' in text
+		assert '累积消耗: $20.00' in text
 		assert '积分' not in text
+
+	def test_renders_index_when_present(self):
+		text = format_check_in_notification(_detail(index=3, name='gptgod-2'))
+
+		assert text.startswith('**3. gptgod-2**')
 
 	def test_renders_credits_amounts(self):
 		text = format_check_in_notification(
@@ -95,8 +103,9 @@ class TestFormatCheckInNotification:
 			)
 		)
 
-		assert '余额: 100 积分' in text
+		assert '签到前余额: 100 积分' in text
 		assert '签到获得: +50 积分' in text
+		assert '签到后余额: 150 积分' in text
 		assert '$' not in text
 
 	def test_no_change_branch(self):
@@ -109,7 +118,11 @@ class TestFormatCheckInNotification:
 			)
 		)
 
-		assert '今日已签到，无变化' in text
+		assert '今日已签到' in text
+		assert '当前余额: $100.00' in text
+		assert '累积消耗: $20.00' in text
+		# 前后一致不重复展示
+		assert '签到前余额' not in text
 
 	def test_usage_without_reward_branch(self):
 		text = format_check_in_notification(
@@ -122,12 +135,28 @@ class TestFormatCheckInNotification:
 			)
 		)
 
-		assert '今日已签到（期间有使用）' in text
-		assert '期间消耗: $5.00' in text
-		assert '余额变化: $-5.00' in text
+		assert '今日已签到（期间有消耗）' in text
+		assert '签到前余额: $100.00' in text
+		assert '签到后余额: $95.00' in text
+		assert '累积消耗: $25.00' in text
+
+	def test_cross_day_estimated_branch(self):
+		text = format_check_in_notification(
+			_detail(
+				after_quota=49.01,
+				after_used=108.0,
+				check_in_reward=5.96,
+				cross_day_estimated=True,
+			)
+		)
+
+		assert '签到获得(跨日估算): +$5.96' in text
+		assert '当前余额: $49.01' in text
+		assert '累积消耗: $108.00' in text
+		assert '签到前余额' not in text
 
 	def test_account_name_is_included(self):
-		assert '[CHECK-IN] 账号一' in format_check_in_notification(_detail(name='账号一'))
+		assert '**账号一**' in format_check_in_notification(_detail(name='账号一'))
 
 
 class TestGetUserInfo:
@@ -339,7 +368,12 @@ class TestUserInfoBrowserFallback:
 		monkeypatch.setattr('checkin.get_user_info', raise_waf)
 		monkeypatch.setattr(
 			'checkin._fetch_user_info_via_browser_sync',
-			lambda *a, **k: {'success': True, 'quota': 5.0, 'used_quota': 2.0, 'display': '💰 当前余额: $5.0, 已用: $2.0'},
+			lambda *a, **k: {
+				'success': True,
+				'quota': 5.0,
+				'used_quota': 2.0,
+				'display': '💰 当前余额: $5.0, 已用: $2.0',
+			},
 		)
 		cache: dict = {}
 
@@ -496,7 +530,10 @@ class TestRunCheckInRequests:
 
 		assert 'new-api-user' not in seen['headers']
 
-	def test_auto_provider_failure_returns_false(self, monkeypatch):
+	def test_auto_provider_balance_failure_keeps_success(self, monkeypatch):
+		"""自动签到型（sign_in_path=None）：登录成功即签到完成，
+		余额查询失败（success=False）不判签到失败，仅余额未知。"""
+
 		def handler(request: httpx.Request) -> httpx.Response:
 			return httpx.Response(200, json={'success': False, 'message': 'unauthorized'})
 
@@ -506,7 +543,7 @@ class TestRunCheckInRequests:
 
 		success, _before, after = run_check_in_requests({'session': 'abc'}, account, 'Account 1', provider)
 
-		assert success is False
+		assert success is True
 		assert after is not None and after['success'] is False
 
 	def test_client_error_is_swallowed_into_false(self, monkeypatch):
@@ -517,4 +554,7 @@ class TestRunCheckInRequests:
 		provider = ProviderConfig(name='demo', domain='https://demo.example.com')
 		account = AccountConfig(cookies={'session': 'abc'}, api_user='42')
 
-		assert run_check_in_requests({'session': 'abc'}, account, 'Account 1', provider) == (False, None, None)
+		ok, before, after = run_check_in_requests({'session': 'abc'}, account, 'Account 1', provider)
+		assert ok is False
+		assert before is None
+		assert after == {'success': False, 'error': '签到过程异常: client init failed'}

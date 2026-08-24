@@ -13,6 +13,9 @@ balance_snapshot.json
 checkin_result.json
 .browser_profiles
 checkin_screenshots
+guyscode_refresh.json
+log.txt
+.device_fp/
 
 .DS_Store
 static.cloudflareinsights.com/

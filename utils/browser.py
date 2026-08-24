@@ -504,9 +504,7 @@ async def fetch_user_self_via_browser(
 	settings = load_browser_login_settings(account_name, provider, persist_profile=persist_profile)
 	host = urlparse(domain).hostname or ''
 	cookie_items = [
-		{'name': name, 'value': value, 'domain': host, 'path': '/'}
-		for name, value in cookies.items()
-		if value
+		{'name': name, 'value': value, 'domain': host, 'path': '/'} for name, value in cookies.items() if value
 	]
 	context = await launch_login_context(settings, use_proxy=use_proxy)
 	try:

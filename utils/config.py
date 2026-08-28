@@ -210,6 +210,21 @@ class AppConfig:
 				use_proxy=False,
 				persist_profile=False,
 			),
+			'cun': ProviderConfig(
+				name='cun',
+				domain='https://www.cun.ai',
+				login_path='/login',
+				# GitHub OAuth 登录 + 主动签到接口（首个 OAuth + 手动签到组合：
+				# 复用 login_with_github_oauth 三段式流程，登录后走通用手动签到分支）
+				sign_in_path='/api/user/checkin',
+				user_info_path='/api/user/self',
+				api_user_key='new-api-user',
+				auth_method='oauth',
+				oauth_client_id='Ov23lipURdGRYDGN2jII',
+				# 站点公告明确大陆地区无法直连（Cloudflare），必须走代理
+				use_proxy=True,
+				persist_profile=False,
+			),
 		}
 
 		# 尝试从环境变量加载自定义 providers

@@ -11,7 +11,7 @@ sys.path.insert(0, str(project_root))
 
 import checkin as checkin_module
 from checkin import login_with_github_oauth
-from utils.config import ProviderConfig
+from utils.config import AccountConfig, AppConfig, ProviderConfig
 
 PROVIDER = ProviderConfig(
 	name='agentrouter',
@@ -212,3 +212,109 @@ class TestLoginWithGithubOauth:
 
 		assert result is not None
 		assert result.api_user is None
+
+
+class TestOauthThenManualCheckin:
+	"""cun 型提供商：GitHub OAuth 登录 + 主动签到接口（首个 OAuth + 手动签到组合）。
+
+	agentrouter/gorouter 是 OAuth + 自动签到；cun 登录成功后还要 POST
+	/api/user/checkin。本端到端测试验证内置 cun 配置走通完整六步序列。
+	"""
+
+	async def test_oauth_login_then_manual_checkin(self, monkeypatch):
+		monkeypatch.setattr('utils.http_client.time.sleep', lambda _s: None)
+		monkeypatch.delenv('PROVIDERS', raising=False)
+		provider = AppConfig.load_from_env().get_provider('cun')
+		assert provider is not None and provider.is_oauth() and provider.needs_manual_check_in()
+
+		requests_log: list[httpx.Request] = []
+
+		def router(req: httpx.Request) -> httpx.Response:
+			requests_log.append(req)
+			host, path = req.url.host, req.url.path
+			if host == 'github.com':
+				return httpx.Response(
+					302, headers={'Location': f'{provider.domain}/oauth/github?code=abc123&state=st-1'}
+				)
+			if path == '/api/oauth/state':
+				return httpx.Response(
+					200, json={'success': True, 'data': 'st-1'}, headers={'set-cookie': 'session=pre; Path=/'}
+				)
+			if path == '/api/oauth/github':
+				return httpx.Response(
+					200,
+					json={'success': True, 'data': {'id': 42, 'checked_in': False}},
+					headers={'set-cookie': 'session=logged-in; Path=/'},
+				)
+			if path == '/api/user/self':
+				# 第 1 次（签到前）quota=$1.0，第 2 次（签到后）$1.5
+				count = sum(1 for r in requests_log if r.url.path == '/api/user/self')
+				quota = 500000 if count <= 1 else 750000
+				return httpx.Response(200, json={'success': True, 'data': {'quota': quota, 'used_quota': 0}})
+			if path == '/api/user/checkin':
+				return httpx.Response(200, json={'success': True})
+			return httpx.Response(404, text=f'unhandled {path}')
+
+		monkeypatch.setattr(
+			checkin_module, 'create_client', lambda **_kw: httpx.Client(transport=httpx.MockTransport(router))
+		)
+
+		account = AccountConfig(cookies=None, github_session='fake-gh-session', provider='cun')
+		app_config = AppConfig(providers={'cun': provider})
+
+		ok, before, after = await checkin_module.check_in_account(account, 0, app_config)
+
+		assert ok is True
+		assert before is not None and before['quota'] == 1.0
+		assert after is not None and after['quota'] == 1.5
+
+		# 完整序列：三段式 OAuth → 签到前余额 → 主动签到 → 签到后余额
+		paths = [(r.url.host, r.url.path) for r in requests_log]
+		assert paths == [
+			('www.cun.ai', '/api/oauth/state'),
+			('github.com', '/login/oauth/authorize'),
+			('www.cun.ai', '/api/oauth/github'),
+			('www.cun.ai', '/api/user/self'),
+			('www.cun.ai', '/api/user/checkin'),
+			('www.cun.ai', '/api/user/self'),
+		]
+
+		# OAuth 回调返回的用户 id 作为 New-Api-User 头随签到请求发送
+		checkin_req = next(r for r in requests_log if r.url.path == '/api/user/checkin')
+		assert checkin_req.headers.get('new-api-user') == '42'
+		# GitHub 会话凭据不外泄到站点请求
+		assert 'fake-gh-session' not in str(checkin_req.headers)
+
+	async def test_oauth_failure_aborts_before_checkin(self, monkeypatch):
+		"""OAuth 登录失败时不得发起签到请求。"""
+		monkeypatch.setattr('utils.http_client.time.sleep', lambda _s: None)
+		monkeypatch.delenv('PROVIDERS', raising=False)
+		provider = AppConfig.load_from_env().get_provider('cun')
+
+		requests_log: list[httpx.Request] = []
+
+		def router(req: httpx.Request) -> httpx.Response:
+			requests_log.append(req)
+			host, path = req.url.host, req.url.path
+			if host == 'github.com':
+				# GitHub 会话过期：401，而非 302
+				return httpx.Response(401, json={'message': 'Bad credentials'})
+			if path == '/api/oauth/state':
+				return httpx.Response(200, json={'success': True, 'data': 'st-1'})
+			return httpx.Response(404, text=f'unhandled {path}')
+
+		monkeypatch.setattr(
+			checkin_module, 'create_client', lambda **_kw: httpx.Client(transport=httpx.MockTransport(router))
+		)
+
+		account = AccountConfig(cookies=None, github_session='expired-gh-session', provider='cun')
+		app_config = AppConfig(providers={'cun': provider})
+
+		ok, before, after = await checkin_module.check_in_account(account, 0, app_config)
+
+		assert ok is False
+		assert before is None
+		assert after is not None and 'OAuth 登录失败' in after['error']
+		# 登录失败后不发起任何站点签到/余额请求
+		assert all(r.url.host != 'www.cun.ai' or r.url.path == '/api/oauth/state' for r in requests_log)
+		assert not any(r.url.path == '/api/user/checkin' for r in requests_log)

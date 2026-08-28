@@ -45,6 +45,24 @@ def test_builtin_gorouter_uses_autocheckin_and_oauth(monkeypatch):
 	assert gorouter.oauth_client_id == 'Ov23lipc1Ups6bRqeQYE'
 
 
+def test_builtin_cun_uses_oauth_and_manual_checkin(monkeypatch):
+	"""cun 与 agentrouter/gorouter 同为 GitHub OAuth，但需主动调 /api/user/checkin 签到。"""
+	monkeypatch.delenv('PROVIDERS', raising=False)
+
+	config = AppConfig.load_from_env()
+
+	cun = config.providers['cun']
+	assert cun.domain == 'https://www.cun.ai'
+	assert cun.sign_in_path == '/api/user/checkin'
+	assert cun.needs_manual_check_in() is True
+	assert cun.is_oauth() is True
+	assert cun.oauth_client_id == 'Ov23lipURdGRYDGN2jII'
+	assert cun.user_info_path == '/api/user/self'
+	assert cun.api_user_key == 'new-api-user'
+	assert cun.use_proxy is True  # 站点大陆无法直连
+	assert cun.persist_profile is False
+
+
 def test_custom_provider_profile_persistence_defaults_to_false(monkeypatch):
 	monkeypatch.setenv('PROVIDERS', json.dumps({'custom': {'domain': 'https://custom.example.com'}}))
 
@@ -115,9 +133,10 @@ class TestWildcardProviderConfig:
 
 		config = AppConfig.load_from_env()
 
-		# 内置默认走代理的 agentrouter/gorouter 也被通配符关闭
+		# 内置默认走代理的 agentrouter/gorouter/cun 也被通配符关闭
 		assert config.providers['agentrouter'].use_proxy is False
 		assert config.providers['gorouter'].use_proxy is False
+		assert config.providers['cun'].use_proxy is False
 
 	def test_specific_entry_overrides_wildcard(self, monkeypatch):
 		monkeypatch.setenv(

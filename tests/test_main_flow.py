@@ -10,7 +10,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 import checkin as checkin_module
-from checkin import generate_balance_hash, load_balance_hash, main, save_balance_hash
+from checkin import account_snapshot_key, generate_balance_hash, load_balance_hash, main, save_balance_hash
 
 
 def _usd(quota: float, used: float) -> dict:
@@ -25,9 +25,11 @@ def _usd(quota: float, used: float) -> dict:
 class _NotifySpy:
 	def __init__(self):
 		self.messages: list[tuple[str, str]] = []
+		self.result: bool | None = True
 
-	def push_message(self, title: str, content: str, msg_type: str = 'text', description: str = '') -> None:
+	def push_message(self, title: str, content: str, msg_type: str = 'text', description: str = '') -> bool | None:
 		self.messages.append((title, content))
+		return self.result
 
 	@property
 	def body(self) -> str:
@@ -88,8 +90,47 @@ class TestBalanceHashPersistence:
 	def test_empty_balances_hash_is_stable(self):
 		assert generate_balance_hash({}) == generate_balance_hash(None)
 
+	def test_account_snapshot_key_does_not_depend_on_display_name_or_index(self):
+		first = _account('显示名 A')
+		second = _account('显示名 B')
+
+		assert account_snapshot_key(first, 0) == account_snapshot_key(second, 10)
+
+	def test_account_snapshot_key_changes_for_different_accounts(self):
+		first = _account('同一个显示名')
+		second = _account('同一个显示名')
+		second.api_user = 'different-user'
+
+		assert account_snapshot_key(first, 0) != account_snapshot_key(second, 1)
+
 
 class TestMainNotification:
+	async def test_notification_failure_keeps_balance_state_for_retry(self, harness, tmp_path):
+		spy = harness(
+			[_account('主号')],
+			[(True, _usd(100.0, 0.0), _usd(125.0, 0.0))],
+		)
+		spy.result = False
+
+		with pytest.raises(SystemExit):
+			await main()
+
+		assert not (tmp_path / 'balance_hash.txt').exists()
+		assert not (tmp_path / 'balance_snapshot.json').exists()
+
+	async def test_no_notification_channel_still_commits_balance_state(self, harness, tmp_path):
+		spy = harness(
+			[_account('主号')],
+			[(True, _usd(100.0, 0.0), _usd(125.0, 0.0))],
+		)
+		spy.result = None
+
+		with pytest.raises(SystemExit):
+			await main()
+
+		assert (tmp_path / 'balance_hash.txt').exists()
+		assert (tmp_path / 'balance_snapshot.json').exists()
+
 	async def test_first_run_notifies_with_balance_detail(self, harness):
 		spy = harness(
 			[_account('主号')],
@@ -129,8 +170,18 @@ class TestMainNotification:
 			[
 				(
 					True,
-					{'success': False, 'quota': 0, 'used_quota': 0, 'error': '余额查询失败（WAF/网络异常）: aliyun_waf_aa'},
-					{'success': False, 'quota': 0, 'used_quota': 0, 'error': '余额查询失败（WAF/网络异常）: aliyun_waf_aa'},
+					{
+						'success': False,
+						'quota': 0,
+						'used_quota': 0,
+						'error': '余额查询失败（WAF/网络异常）: aliyun_waf_aa',
+					},
+					{
+						'success': False,
+						'quota': 0,
+						'used_quota': 0,
+						'error': '余额查询失败（WAF/网络异常）: aliyun_waf_aa',
+					},
 				)
 			],
 		)

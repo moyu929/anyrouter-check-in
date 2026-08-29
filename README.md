@@ -207,6 +207,7 @@ run_check_in_requests()        查余额 → 签到 → 再查余额（WAF 拦�
 | `bypass_method`       | string \| null | 否   | `null`              | WAF 绕过方式：`"waf_cookies"` 或 `null`                                                       |
 | `waf_cookie_names`    | array          | 条件 | —                   | WAF 绕过所需 cookie 名称列表；为空或全部非法时 `bypass_method` 自动降级为 `null`              |
 | `use_proxy`           | bool           | 否   | `false`             | 该提供商是否走代理                                                                            |
+| `allow_direct_fallback` | bool         | 否   | `true`              | 代理不可用时是否允许直连；设为 `false` 可对该提供商启用严格代理模式                         |
 | `persist_profile`     | bool           | 否   | `false`             | 是否复用持久化浏览器 Profile（内置 `anyrouter` 为 `true`），可减少重复登录与风控              |
 | `auth_method`         | string \| null | 否   | `null`              | `"oauth"` 走 GitHub OAuth 重放，`"gptgod"` 走 GPTGod 纯 API 分支；`null` 时按账号字段自动判断 |
 | `oauth_client_id`     | string         | 条件 | —                   | `auth_method="oauth"` 时必填                                                                  |
@@ -297,7 +298,7 @@ run_check_in_requests()        查余额 → 签到 → 再查余额（WAF 拦�
 | `PROXY_PORT`             | `7890`                                 | CI 脚本           | mihomo 本地 mixed-port                                                              |
 | `MIHOMO_VERSION`         | `v1.19.0`                              | CI 脚本           | mihomo 版本。当前 workflow 固定为 `v1.19.27`                                        |
 | `PROXY_REQUIRED`         | `false`                                | CI 脚本           | `true` 时代理不可用即让 workflow 失败退出；`false` 时降级为直连继续执行             |
-| `PROXY_RETRY_TIMES`      | `3`                                    | Python            | 代理节点问题（WAF/5xx/超时）时，切换节点重试的最多次数，含最后一次直连兜底         |
+| `PROXY_RETRY_TIMES`      | `3`                                    | Python            | 代理节点问题（WAF/5xx/超时）时，切换节点重试的最多次数；是否直连回退由提供商 `allow_direct_fallback` 控制 |
 | `MIHOMO_CONTROLLER`      | —                                      | Python            | mihomo REST API 地址，由代理脚本自动写入 `GITHUB_ENV`，无需手动设置                |
 | `MIHOMO_CONTROLLER_PORT` | `9090`                                 | CI 脚本           | mihomo REST API 端口，可覆盖默认值                                                  |
 | `MIHOMO_SECRET_FILE`     | —                                      | Python            | mihomo REST API secret 文件路径，由代理脚本自动写入 `GITHUB_ENV`，无需手动设置     |
@@ -328,7 +329,7 @@ run_check_in_requests()        查余额 → 签到 → 再查余额（WAF 拦�
 2. 🇸🇬 新加坡 组内同逻辑
    └─ 全部排除 → 进入 🇭🇰 香港
 3. 🇭🇰 香港 组内同逻辑
-   └─ 全部排除 → 返回 None（该账号尝试直连兜底）
+   └─ 全部排除 → 返回 None（按提供商配置决定是否直连兜底）
 ```
 
 - 节点选择器维护**全局排除集合**，一旦某节点因 WAF 拦截 / 超时 / 连通性失败被排除，后续所有账号与重试不再选择该节点。
@@ -343,17 +344,18 @@ run_check_in_requests()        查余额 → 签到 → 再查余额（WAF 拦�
 - 网络异常（超时 / 连接断开 / DNS 解析失败）
 - 节点连通性验证失败
 
-若节点选择器已无可用节点，最后一次尝试**直连目标网站**。重试仍失败则放弃该账号，继续下一账号。
+若节点选择器已无可用节点，默认最后一次尝试**直连目标网站**；当提供商设置 `allow_direct_fallback=false` 时直接判定该账号失败。重试仍失败则继续下一账号。
 
 ### 5.3 回退机制
 
 ```
-🇯🇵 日本 → 🇸🇬 新加坡 → 🇭🇰 香港 → 直连
+🇯🇵 日本 → 🇸🇬 新加坡 → 🇭🇰 香港 →（默认）直连
 ```
 
 - **节点选择器**：按区域顺序，区域内并行测速选最低延迟节点，逐节点验证连通性，不通则排除并换下一个。
 - **Python 层**：进程内首次用到代理时做一次连通性探测并缓存结果；探测失败则该次运行全程直连，并在日志中打印 `代理 ... 不可达，回退到直连`。
 - **提供商层**：`use_proxy=false` 的提供商不读取代理地址、不做探测，始终直连。
+- **严格代理**：在 `PROVIDERS` 的提供商配置中设置 `"allow_direct_fallback": false`，代理未配置、不可用或节点耗尽时不会暴露到直连出口。
 
 > 代理仅作用于本项目的浏览器与 HTTP 客户端（通过 `CHECKIN_PROXY_URL`），不会设置全局 `HTTP_PROXY`/`HTTPS_PROXY`，因此不影响 Actions 的其他步骤。
 
@@ -492,4 +494,3 @@ uv run pytest tests/ --cov=.
 ## 11. 免责声明
 
 本脚本仅用于学习和研究目的，使用前请确保遵守相关网站的使用条款。
-

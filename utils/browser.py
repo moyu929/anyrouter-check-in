@@ -17,6 +17,7 @@ from utils.popups import dismiss_popups, setup_popup_guard
 from utils.proxy import get_playwright_proxy, redact_proxy_url
 
 if TYPE_CHECKING:
+	from playwright._impl._api_structures import SetCookieParam
 	from playwright.async_api import BrowserContext, Locator, Page
 
 EMAIL_LOGIN_BUTTON_NAMES = (
@@ -511,7 +512,7 @@ async def fetch_user_self_via_browser(
 	]
 	context = await launch_login_context(settings, use_proxy=use_proxy)
 	try:
-		await context.add_cookies(cookie_items)
+		await context.add_cookies(cast('list[SetCookieParam]', cookie_items))
 		page = await context.new_page()
 		await prepare_browser_page(page)
 		return await verify_browser_login(page, f'{domain}/console', timeout_ms)

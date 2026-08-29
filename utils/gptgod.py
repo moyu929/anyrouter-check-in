@@ -20,6 +20,7 @@ import json
 import random
 import re
 import time
+from typing import TypedDict
 from urllib.parse import unquote
 
 import httpx
@@ -29,6 +30,13 @@ from utils.debug import log
 from utils.http_client import create_client, request_with_retry
 
 BASE = 'https://gptgod.online'
+
+
+class _GptGodState(TypedDict):
+	calls: int
+	credits: list[int | None]
+	raw: list[dict | None]
+
 
 # ---------------------------------------------------------------------------
 # wa() 解密 — Python 实现
@@ -216,7 +224,7 @@ def gptgod_checkin(
 	client = _make_client(use_proxy=use_proxy)
 	try:
 		# 状态记录：首查/次查积分与原始 info（None 表示查询失败，防假成功校验需区分）
-		state = {'calls': 0, 'credits': [None, None], 'raw': [None, None]}
+		state: _GptGodState = {'calls': 0, 'credits': [None, None], 'raw': [None, None]}
 
 		def authenticate() -> bool:
 			# 预热（拿 XSRF-TOKEN cookie）
@@ -245,6 +253,7 @@ def gptgod_checkin(
 					f'{BASE}/api/user/login',
 					json={'email': email, 'password': password_md5, 'auto_login': True},
 					timeout=30,
+					retry_non_idempotent=True,
 				)
 				login_data = login_resp.json() if login_resp.status_code == 200 else {}
 				if login_data.get('code') != 0:
@@ -309,6 +318,7 @@ def gptgod_checkin(
 				f'{BASE}/api/user/checkin',
 				json={'_k': _k, _n: _jztz},
 				timeout=30,
+				retry_non_idempotent=False,
 			)
 			checkin_data = checkin_resp.json() if checkin_resp.status_code == 200 else {}
 			if checkin_data.get('code') != 0:

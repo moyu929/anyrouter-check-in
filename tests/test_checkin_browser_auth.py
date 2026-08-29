@@ -107,6 +107,20 @@ class TestPrepareCookies:
 			use_proxy=True,
 		)
 
+	async def test_prepare_cookies_can_force_direct_mode(self, monkeypatch):
+		provider = _provider(use_proxy=True)
+		get_waf = AsyncMock(return_value={'acw_tc': 'fresh'})
+		monkeypatch.setattr(checkin, 'get_waf_cookies_with_browser', get_waf)
+
+		await checkin.prepare_cookies('A', provider, {'session': 's'}, use_proxy=False)
+
+		get_waf.assert_awaited_once_with(
+			'A',
+			'https://demo.example/login',
+			['acw_tc'],
+			use_proxy=False,
+		)
+
 	async def test_no_waf_provider_returns_user_cookies_without_browser(self, monkeypatch):
 		provider = _provider(bypass_method=None, waf_cookie_names=None)
 		get_waf = AsyncMock()

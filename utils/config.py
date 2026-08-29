@@ -24,6 +24,7 @@ class ProviderConfig:
 	bypass_method: Literal['waf_cookies'] | None = None
 	waf_cookie_names: List[str] | None = None
 	use_proxy: bool = False
+	allow_direct_fallback: bool = True
 	persist_profile: bool = False
 	auth_method: Literal['email', 'oauth', 'gptgod', 'guyscode', 'newapi_jwt', 'newapi_session'] | None = None
 	oauth_client_id: str | None = None
@@ -57,6 +58,7 @@ class ProviderConfig:
 		- 完整: {"domain": "https://example.com", "login_path": "/login", "use_proxy": true, ...}
 		"""
 		default_use_proxy = defaults.use_proxy if defaults else False
+		default_allow_direct_fallback = defaults.allow_direct_fallback if defaults else True
 		default_persist_profile = defaults.persist_profile if defaults else False
 		# domain 允许省略：未提供时从内置默认继承（PROVIDERS 常只覆盖 use_proxy 等字段）
 		domain = data.get('domain') or (defaults.domain if defaults else '')
@@ -72,6 +74,7 @@ class ProviderConfig:
 			bypass_method=data.get('bypass_method', defaults.bypass_method if defaults else None),
 			waf_cookie_names=data.get('waf_cookie_names', defaults.waf_cookie_names if defaults else None),
 			use_proxy=data.get('use_proxy', default_use_proxy),
+			allow_direct_fallback=data.get('allow_direct_fallback', default_allow_direct_fallback),
 			persist_profile=data.get('persist_profile', default_persist_profile),
 			auth_method=data.get('auth_method', defaults.auth_method if defaults else None),
 			oauth_client_id=data.get('oauth_client_id', defaults.oauth_client_id if defaults else None),

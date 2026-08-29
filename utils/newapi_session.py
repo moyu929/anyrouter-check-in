@@ -72,7 +72,14 @@ def _get_user_info(client: httpx.Client, domain: str, account_name: str, rate: f
 
 def _perform_checkin(client: httpx.Client, domain: str, account_name: str) -> tuple[bool, str | None]:
 	"""POST /api/user/checkin（空 body + cookie + New-Api-User）。返回 (ok, message)。"""
-	resp = request_with_retry(client, 'POST', f'{domain}/api/user/checkin', json={}, timeout=30)
+	resp = request_with_retry(
+		client,
+		'POST',
+		f'{domain}/api/user/checkin',
+		json={},
+		timeout=30,
+		retry_non_idempotent=False,
+	)
 	return parse_checkin_response(resp)
 
 

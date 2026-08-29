@@ -317,6 +317,54 @@ class TestRequestWithRetry:
 		assert seen['body'] == b'{"a":1}'
 		assert seen['header'] == 'yes'
 
+	def test_post_is_not_retried_by_default(self, monkeypatch):
+		monkeypatch.setattr('utils.http_client.time.sleep', lambda _s: None)
+		calls = []
+
+		def handler(request: httpx.Request) -> httpx.Response:
+			calls.append(request.url.path)
+			return httpx.Response(503)
+
+		with self._client(handler) as client:
+			response = request_with_retry(client, 'POST', 'https://example.com/checkin', max_retries=3)
+
+		assert response.status_code == 503
+		assert len(calls) == 1
+
+	def test_post_network_error_is_not_retried_by_default(self, monkeypatch):
+		monkeypatch.setattr('utils.http_client.time.sleep', lambda _s: None)
+		calls = []
+
+		def handler(request: httpx.Request) -> httpx.Response:
+			calls.append(request.url.path)
+			raise httpx.ConnectError('refused', request=request)
+
+		with self._client(handler) as client, pytest.raises(httpx.ConnectError):
+			request_with_retry(client, 'POST', 'https://example.com/checkin', max_retries=3)
+
+		assert len(calls) == 1
+
+	def test_post_can_opt_in_to_retry(self, monkeypatch):
+		monkeypatch.setattr('utils.http_client.time.sleep', lambda _s: None)
+		statuses = [503, 200]
+		calls = []
+
+		def handler(request: httpx.Request) -> httpx.Response:
+			calls.append(request.url.path)
+			return httpx.Response(statuses[len(calls) - 1])
+
+		with self._client(handler) as client:
+			response = request_with_retry(
+				client,
+				'POST',
+				'https://example.com/login',
+				max_retries=1,
+				retry_non_idempotent=True,
+			)
+
+		assert response.status_code == 200
+		assert len(calls) == 2
+
 
 class TestNeedsProxy:
 	@staticmethod

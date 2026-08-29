@@ -31,8 +31,17 @@ class _FakeSelector:
 		return self.node_result
 
 
-def _app_config(*, use_proxy: bool = True) -> AppConfig:
-	return AppConfig(providers={'tp': ProviderConfig(name='tp', domain='https://example.com', use_proxy=use_proxy)})
+def _app_config(*, use_proxy: bool = True, allow_direct_fallback: bool = True) -> AppConfig:
+	return AppConfig(
+		providers={
+			'tp': ProviderConfig(
+				name='tp',
+				domain='https://example.com',
+				use_proxy=use_proxy,
+				allow_direct_fallback=allow_direct_fallback,
+			)
+		}
+	)
 
 
 def _account() -> AccountConfig:
@@ -160,6 +169,40 @@ class TestRetryDispatch:
 		assert result[0] is True
 		assert len(calls) == 2
 		assert calls[1]['force_direct'] is True  # 第二次为直连
+
+	async def test_no_node_available_fails_when_direct_fallback_disabled(self, fake_checkin, monkeypatch):
+		calls, _ = fake_checkin
+		selector = _FakeSelector(node_result=None)
+		monkeypatch.setattr(checkin, 'no_available_node', lambda: True)
+
+		result = await check_in_account_with_retry(
+			_account(),
+			0,
+			_app_config(allow_direct_fallback=False),
+			selector,
+		)
+
+		assert result[0] is False
+		assert '已禁用直连回退' in result[2]['error']
+		assert calls == []
+
+	async def test_node_exhaustion_fails_when_direct_fallback_disabled(self, fake_checkin, monkeypatch):
+		calls, behaviour = fake_checkin
+		behaviour['call1'] = 'issue'
+		selector = _FakeSelector(node_result=None)
+		monkeypatch.setattr(checkin, 'no_available_node', lambda: False)
+		monkeypatch.setattr(checkin, 'current_proxy_node', lambda: 'node1')
+
+		result = await check_in_account_with_retry(
+			_account(),
+			0,
+			_app_config(allow_direct_fallback=False),
+			selector,
+		)
+
+		assert result[0] is False
+		assert '已禁用直连回退' in result[2]['error']
+		assert len(calls) == 1
 
 
 async def _always_issue(*args, **kwargs):

@@ -325,7 +325,7 @@ class TestPushMessageResilience:
 		bark = MagicMock()
 		monkeypatch.setattr(instance, 'send_bark', bark)
 
-		instance.push_message('标题', '正文')
+		assert instance.push_message('标题', '正文') is True
 
 		assert bark.called
 		out = capsys.readouterr().out
@@ -346,3 +346,28 @@ class TestPushMessageResilience:
 		assert 'NotifyX 推送成功' in out
 		assert '推送失败' not in out
 		assert '未配置' not in out
+
+	def test_all_configured_channels_failing_returns_false(self, kit, monkeypatch, capsys):
+		instance = kit()
+		for field in (
+			'email_user',
+			'email_pass',
+			'email_to',
+			'pushplus_token',
+			'server_push_key',
+			'dingding_webhook',
+			'feishu_webhook',
+			'weixin_webhook',
+			'gotify_url',
+			'gotify_token',
+			'telegram_bot_token',
+			'telegram_chat_id',
+			'bark_key',
+			'notifyx_key',
+		):
+			setattr(instance, field, None)
+		instance.bark_key = 'bark-key'
+		monkeypatch.setattr(instance, 'send_bark', MagicMock(side_effect=RuntimeError('service down')))
+
+		assert instance.push_message('标题', '正文') is False
+		assert '所有已配置通知渠道均发送失败' in capsys.readouterr().out

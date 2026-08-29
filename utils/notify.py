@@ -213,8 +213,11 @@ class NotificationKit:
 		content: str,
 		msg_type: Literal['text', 'html', 'markdown'] = 'text',
 		description: str = '',
-	) -> bool:
-		"""推送通知。返回是否实际发送（False 表示未配置任何渠道而跳过）。
+	) -> bool | None:
+		"""推送通知。
+
+		返回 True 表示至少一个渠道发送成功，False 表示已配置渠道但全部发送失败，
+		None 表示未配置任何渠道而跳过。
 
 		msg_type='markdown' 时的渠道适配：
 		  * NotifyX（文档原生支持 Markdown）/ 飞书（markdown 卡片）→ 原样发送；
@@ -223,7 +226,7 @@ class NotificationKit:
 		"""
 		if not self._any_channel_configured():
 			log.notify('未配置任何通知渠道，跳过推送')
-			return False
+			return None
 
 		if msg_type == 'markdown':
 			md_content = content
@@ -232,6 +235,7 @@ class NotificationKit:
 		else:
 			md_content = plain_content = telegram_content = content
 
+		email_subtype: Literal['text', 'html']
 		if msg_type == 'html':
 			email_body, email_subtype = content, 'html'
 		else:
@@ -250,19 +254,27 @@ class NotificationKit:
 			('NotifyX', lambda: self.send_notifyx(title, md_content, description)),
 		]
 
+		success_count = 0
+		failed_count = 0
 		for name, func in notifications:
 			try:
 				func()
+				success_count += 1
 				log.notify(f'{name} 推送成功')
 			except ValueError as e:
 				# 未配置的渠道静默跳过，不刷"未配置"警告噪音（仅 debug 可见）
 				if 'not configured' in str(e) or 'configuration not set' in str(e):
 					log.detail(f'{name} 未配置，跳过推送')
 				else:
+					failed_count += 1
 					log.warn(f'{name} 推送失败: {str(e)}')
 			except Exception as e:
+				failed_count += 1
 				log.warn(f'{name} 推送失败: {str(e)}')
-		return True
+
+		if failed_count and success_count == 0:
+			log.warn('所有已配置通知渠道均发送失败')
+		return success_count > 0
 
 
 notify = NotificationKit()

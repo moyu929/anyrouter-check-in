@@ -552,7 +552,7 @@ class TestRunCheckInRequests:
 
 class TestRunCheckInRequestsNetworkErrors:
 	def test_connect_error_raises_proxy_node_issue(self, monkeypatch):
-		"""manual 模式下 signin 请求网络异常耗尽重试 → _NETWORK_ERRORS → ProxyNodeIssue。"""
+		"""manual 模式下 signin 网络异常不重复提交，也不触发节点重试。"""
 		# 加速：关闭重试退避 sleep
 		monkeypatch.setattr('utils.http_client.time.sleep', lambda _s: None)
 		monkeypatch.setenv('RETRY_TIMES', '0')
@@ -579,15 +579,17 @@ class TestRunCheckInRequestsNetworkErrors:
 		provider = _FakeProvider(sign_in_path='/api/user/checkin')
 		provider.__dict__['needs_manual_check_in'] = lambda: True
 
-		from checkin import ProxyNodeIssue
+		ok, before, after = run_check_in_requests(
+			{'session': 'abc'},
+			AccountConfig(cookies={'s': '1'}, provider='tp'),
+			'AccX',
+			provider,
+		)
 
-		with pytest.raises(ProxyNodeIssue):
-			run_check_in_requests(
-				{'session': 'abc'},
-				AccountConfig(cookies={'s': '1'}, provider='tp'),
-				'AccX',
-				provider,
-			)
+		assert ok is False
+		assert before and before['success'] is True
+		assert after and after['success'] is True
+		assert call_count['n'] == 3  # 前查询、签到单次请求、后查询
 
 	def test_generic_exception_returns_failure_tuple(self, monkeypatch):
 		def create(**_kw):
@@ -625,8 +627,10 @@ class _FakeProvider2:
 	):
 		self.auth_method = auth_method
 		self.domain = domain
+		self.name = name
 		self.provider_name = name
 		self.use_proxy = use_proxy
+		self.allow_direct_fallback = True
 
 	def is_oauth(self):
 		return self.auth_method == 'github_oauth'
@@ -829,7 +833,8 @@ class TestCheckInAccount:
 
 	# ----------------------------------------------------- 分支 11：force_direct 取消代理
 	def test_force_direct_disables_proxy_flag(self, monkeypatch):
-		async def fake_prepare(acc_name, provider_cfg, user_cookies):
+		async def fake_prepare(acc_name, provider_cfg, user_cookies, **kwargs):
+			fake_prepare.use_proxy = kwargs.get('use_proxy')
 			return dict(user_cookies)
 
 		monkeypatch.setattr(checkin_module, 'prepare_cookies', fake_prepare)
@@ -846,3 +851,17 @@ class TestCheckInAccount:
 
 		self._run(check_in_account(acc, 0, app, force_direct=True))
 		assert fake_run.use_proxy is False
+		assert fake_prepare.use_proxy is False
+
+	def test_strict_proxy_provider_fails_without_available_proxy(self, monkeypatch):
+		provider = _FakeProvider2(use_proxy=True)
+		provider.allow_direct_fallback = False
+		app = self._app(monkeypatch, provider)
+		monkeypatch.setattr(checkin_module, 'get_proxy_server', lambda **_kwargs: None)
+		acc = AccountConfig(cookies={'s': 'abc'}, provider='tp')
+
+		ok, before, after = self._run(check_in_account(acc, 0, app))
+
+		assert ok is False
+		assert before is None
+		assert '未检测到可用代理' in after['error']

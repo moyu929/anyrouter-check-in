@@ -50,6 +50,8 @@ QUOTA_PER_DOLLAR = 500000
 DEFAULT_RETRY_TIMES = 3
 _RETRYABLE_STATUS = (429, 500, 502, 503, 504)
 _RETRYABLE_EXCEPTIONS = (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError)
+# GET/HEAD/OPTIONS 以及语义上幂等的 PUT/DELETE 可以安全重试；POST 默认只执行一次。
+_RETRYABLE_METHODS = frozenset({'GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE'})
 
 # 可能携带敏感凭据的查询参数，日志脱敏时隐藏其值
 _SENSITIVE_QUERY_PARAMS = {'code', 'state', 'token', 'access_token', 'user_session', '_k'}
@@ -93,11 +95,14 @@ def request_with_retry(
 	url: str,
 	*,
 	max_retries: int | None = None,
+	retry_non_idempotent: bool = False,
 	**kwargs,
 ) -> httpx.Response:
 	"""带指数退避重试的 HTTP 请求。
 
-	对 5xx、429 状态码及网络异常（超时/连接断开/网络错误）自动重试。
+	对幂等请求的 5xx、429 状态码及网络异常（超时/连接断开/网络错误）自动重试。
+	POST 等非幂等请求默认只执行一次，避免服务端已完成操作但响应丢失时重复提交。
+	需要明确承担重复提交风险的调用方可通过 retry_non_idempotent=True 开启重试。
 	4xx 客户端错误直接返回，不重试。
 
 	参数:
@@ -105,16 +110,18 @@ def request_with_retry(
 	  method: 请求方法，如 'GET'、'POST'
 	  url: 请求地址
 	  max_retries: 最大重试次数，默认使用 RETRY_TIMES 环境变量（默认 3）
+	  retry_non_idempotent: 是否允许 POST 等非幂等请求重试，默认 False
 	  **kwargs: 透传给 client.request 的参数
 	"""
 	retries = max_retries if max_retries is not None else get_retry_times()
+	can_retry = retry_non_idempotent or method.upper() in _RETRYABLE_METHODS
 	last_error: str | Exception | None = None
 
 	for attempt in range(retries + 1):
 		try:
 			response = client.request(method, url, **kwargs)
 			# 4xx 及 2xx/3xx 直接返回，不重试
-			if response.status_code not in _RETRYABLE_STATUS:
+			if not can_retry or response.status_code not in _RETRYABLE_STATUS:
 				return response
 			last_error = f'HTTP {response.status_code}'
 			if attempt >= retries:
@@ -125,6 +132,8 @@ def request_with_retry(
 			)
 			time.sleep(wait)
 		except _RETRYABLE_EXCEPTIONS as e:
+			if not can_retry:
+				raise
 			last_error = e
 			if attempt >= retries:
 				break

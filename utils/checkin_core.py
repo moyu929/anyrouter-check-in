@@ -54,7 +54,11 @@ def quota_to_currency(quota: object, per_unit: float = QUOTA_PER_DOLLAR, rate: f
 
 	注意保持"先除后乘再 round"的顺序，与既有实现同一浮点路径，避免尾数抖动。
 	"""
-	return round(float(quota or 0) / per_unit * rate, 2)
+	if isinstance(quota, (int, float)):
+		value = float(quota)
+	else:
+		value = float(str(quota or 0))
+	return round(value / per_unit * rate, 2)
 
 
 def format_amount(value: float, unit: str) -> str:
@@ -112,6 +116,7 @@ def newapi_login(client, domain: str, email: str, password: str, account_name: s
 			f'{domain}/api/user/login',
 			json={'username': email, 'password': password},
 			timeout=30,
+			retry_non_idempotent=True,
 		)
 	except Exception as e:
 		log.warn(f'{account_name}: 登录异常: {e}')

@@ -403,7 +403,14 @@ def _refresh_access_token(client: httpx.Client, refresh_token: str, account_name
 	若响应同时携带新的 refresh_token（轮换机制），自动回写持久化，避免旧 token 被消费后过期。
 	"""
 	try:
-		resp = request_with_retry(client, 'POST', REFRESH_API, json={'refresh_token': refresh_token}, timeout=30)
+		resp = request_with_retry(
+			client,
+			'POST',
+			REFRESH_API,
+			json={'refresh_token': refresh_token},
+			timeout=30,
+			retry_non_idempotent=True,
+		)
 		code, data = _parse_payload(resp)
 		token = _extract_token(data)
 		if code == 0 and token:
@@ -445,7 +452,14 @@ def _perform_checkin(client: httpx.Client, account_name: str) -> tuple[bool, str
 
 	成功时自行打印奖励明细（成功文案含金额，故关闭中枢的通用成功日志）。
 	"""
-	resp = request_with_retry(client, 'POST', CHECKIN_API, json={}, timeout=30)
+	resp = request_with_retry(
+		client,
+		'POST',
+		CHECKIN_API,
+		json={},
+		timeout=30,
+		retry_non_idempotent=False,
+	)
 	code, data = _parse_payload(resp)
 	if code == 0:
 		reward = data.get('reward_amount_usd')
@@ -517,8 +531,12 @@ def guyscode_checkin(
 			account_name,
 			unit='usd',
 			authenticate=authenticate,
-			fetch_user_info=lambda: _fetch_balance_info(authed, account_name),
-			perform_checkin=lambda: _perform_checkin(authed, account_name),
+			fetch_user_info=lambda: _fetch_balance_info(authed, account_name)
+			if authed is not None
+			else failed_info('登录客户端未初始化'),
+			perform_checkin=lambda: _perform_checkin(authed, account_name)
+			if authed is not None
+			else (False, '登录客户端未初始化'),
 			success_detail=None,  # 成功文案含奖励金额，由 _perform_checkin 自行打印
 		)
 	finally:

@@ -50,7 +50,14 @@ def _get_user_info(client: httpx.Client, domain: str, account_name: str) -> dict
 
 def _perform_checkin(client: httpx.Client, domain: str, account_name: str) -> tuple[bool, str | None]:
 	"""POST /api/user/checkin（空 body + Bearer）。返回 (ok, message)。"""
-	resp = request_with_retry(client, 'POST', f'{domain}/api/user/checkin', json={}, timeout=30)
+	resp = request_with_retry(
+		client,
+		'POST',
+		f'{domain}/api/user/checkin',
+		json={},
+		timeout=30,
+		retry_non_idempotent=False,
+	)
 	return parse_checkin_response(resp)
 
 
@@ -88,8 +95,12 @@ def newapi_jwt_checkin(
 			account_name,
 			unit='usd',
 			authenticate=authenticate,
-			fetch_user_info=lambda: _get_user_info(authed, domain, account_name),
-			perform_checkin=lambda: _perform_checkin(authed, domain, account_name),
+			fetch_user_info=lambda: _get_user_info(authed, domain, account_name)
+			if authed is not None
+			else failed_info('登录客户端未初始化'),
+			perform_checkin=lambda: _perform_checkin(authed, domain, account_name)
+			if authed is not None
+			else (False, '登录客户端未初始化'),
 		)
 	finally:
 		if authed is not None:

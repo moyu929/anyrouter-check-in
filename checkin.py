@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from datetime import datetime
 from urllib.parse import urlencode, urlparse
 
@@ -52,7 +53,7 @@ from utils.http_client import API_HEADERS, RetryExhaustedError, create_client, r
 from utils.newapi_jwt import newapi_jwt_checkin
 from utils.newapi_session import newapi_session_checkin
 from utils.notify import notify
-from utils.proxy import get_playwright_proxy, is_proxy_configured, needs_proxy, redact_proxy_url
+from utils.proxy import get_playwright_proxy, get_proxy_server, is_proxy_configured, needs_proxy, redact_proxy_url
 from utils.proxy_selector import NodeSelector, available, current_proxy_node, no_available_node
 
 BALANCE_HASH_FILE = 'balance_hash.txt'
@@ -92,17 +93,37 @@ def load_balance_hash():
 	return None
 
 
+def _atomic_write_text(path: str, content: str) -> None:
+	"""将文本安全写入目标文件，避免进程中断留下半截状态文件。"""
+	destination = os.path.abspath(path)
+	parent = os.path.dirname(destination) or os.curdir
+	temp_path: str | None = None
+	try:
+		fd, temp_path = tempfile.mkstemp(prefix=f'.{os.path.basename(destination)}.', dir=parent, text=True)
+		with os.fdopen(fd, 'w', encoding='utf-8', newline='') as f:
+			f.write(content)
+			f.flush()
+			os.fsync(f.fileno())
+		os.replace(temp_path, destination)
+		temp_path = None
+	finally:
+		if temp_path:
+			try:
+				os.unlink(temp_path)
+			except OSError:
+				pass
+
+
 def save_balance_hash(balance_hash):
 	"""保存余额hash"""
 	try:
-		with open(BALANCE_HASH_FILE, 'w', encoding='utf-8') as f:
-			f.write(balance_hash)
+		_atomic_write_text(BALANCE_HASH_FILE, balance_hash)
 	except Exception as e:
 		log.warn(f'警告: 保存余额哈希失败: {e}')
 
 
 def load_balance_snapshot() -> dict[str, float]:
-	"""加载跨日总额快照 {账号名: 签到后总额}。
+	"""加载跨日总额快照 {稳定账号键: 签到后总额}。
 
 	用于还原"登录即自动签到"类账号（agentrouter/gorouter）的当日签到奖励：
 	单次运行拿到的余额已是签到后，无法像手动签到那样前后对比，故用昨日总额快照跨日估算。
@@ -121,8 +142,10 @@ def load_balance_snapshot() -> dict[str, float]:
 def save_balance_snapshot(snapshot: dict[str, float]) -> None:
 	"""保存跨日总额快照。"""
 	try:
-		with open(BALANCE_SNAPSHOT_FILE, 'w', encoding='utf-8') as f:
-			json.dump(snapshot, f, ensure_ascii=False, sort_keys=True)
+		_atomic_write_text(
+			BALANCE_SNAPSHOT_FILE,
+			json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+		)
 	except Exception as e:
 		log.warn(f'保存余额快照失败: {e}')
 
@@ -134,6 +157,29 @@ def generate_balance_hash(balances):
 	)
 	balance_json = json.dumps(simple_balances, sort_keys=True, separators=(',', ':'))
 	return hashlib.sha256(balance_json.encode('utf-8')).hexdigest()[:16]
+
+
+def account_snapshot_key(account: AccountConfig, account_index: int) -> str:
+	"""生成不包含凭据的稳定账号键，避免名称重复或账号重排破坏跨日快照。"""
+	if account.email:
+		identity = f'email:{account.email.strip().casefold()}'
+	elif account.github_session:
+		identity = f'github:{account.github_session}'
+	else:
+		cookies = parse_cookies(account.cookies)
+		cookie_pairs = sorted((str(key), str(value)) for key, value in cookies.items())
+		stable_value = account.api_user or cookies.get('session') or cookies.get('token')
+		if stable_value:
+			identity = f'cookies:{stable_value}'
+		elif cookie_pairs:
+			stable_value = json.dumps(cookie_pairs, ensure_ascii=False)
+			identity = f'cookies:{stable_value}'
+		else:
+			identity = f'index:{account_index}'
+
+	material = f'{account.provider}\0{identity}'
+	digest = hashlib.sha256(material.encode('utf-8')).hexdigest()[:16]
+	return f'account_v2_{digest}'
 
 
 def load_retry_indexes() -> list[int] | None:
@@ -167,8 +213,7 @@ def save_checkin_result(failed_indexes: list[int], total: int) -> None:
 			'total': total,
 			'failed': failed_indexes,
 		}
-		with open(CHECKIN_RESULT_FILE, 'w', encoding='utf-8') as f:
-			json.dump(payload, f, ensure_ascii=False)
+		_atomic_write_text(CHECKIN_RESULT_FILE, json.dumps(payload, ensure_ascii=False))
 	except Exception as e:
 		log.warn(f'保存签到结果失败: {e}')
 
@@ -253,6 +298,8 @@ async def login_with_credentials(
 	provider_name: str,
 	email: str,
 	password: str,
+	*,
+	force_direct: bool = False,
 ) -> BrowserLoginResult | None:
 	"""使用邮箱密码通过浏览器登录，返回 cookies 与拦截到的 api user id。"""
 	log.detail(f'{account_name}: 正在使用邮箱密码登录...')
@@ -276,7 +323,7 @@ async def login_with_credentials(
 	context = None
 	page = None
 	try:
-		context = await launch_login_context(settings, use_proxy=provider_config.use_proxy)
+		context = await launch_login_context(settings, use_proxy=provider_config.use_proxy and not force_direct)
 		page = await context.new_page()
 		await prepare_browser_page(page)
 		await navigate_login_page(
@@ -394,7 +441,12 @@ async def login_with_github_oauth(
 		new_protocol = False
 		try:
 			probe_resp = request_with_retry(
-				client, 'POST', state_url, json={'provider': 'github', 'intent': 'login'}, timeout=30
+				client,
+				'POST',
+				state_url,
+				json={'provider': 'github', 'intent': 'login'},
+				timeout=30,
+				retry_non_idempotent=True,
 			)
 		except Exception as e:
 			if _is_node_issue_exception(e):
@@ -449,6 +501,13 @@ async def login_with_github_oauth(
 				return None
 
 			log.detail(f'{account_name}: 获取到 OAuth 状态（cookies: {list(client.cookies.keys())}）')
+
+		if not state:
+			log.failed(f'{account_name}: OAuth 状态为空')
+			return None
+		if not github_client_id:
+			log.failed(f'{account_name}: OAuth client id 未配置')
+			return None
 
 		# Step 2: 用 GitHub user_session 获取授权 code（新版与站点前端一致带 scope）
 		log.debug(f'{account_name}: 第2步 - 获取 GitHub OAuth code...')
@@ -544,7 +603,7 @@ async def login_with_github_oauth(
 		return BrowserLoginResult(cookies=all_cookies, api_user=api_user, bearer_token=bearer_token)
 
 
-def get_user_info(client, headers, user_info_url: str, *, propagate_network_error: bool = True):
+def get_user_info(client, headers, user_info_url: str, *, propagate_network_error: bool = True) -> dict:
 	"""获取用户信息（带重试）。
 
 	propagate_network_error=True（默认）时，网络异常及可重试状态耗尽会向上抛出，
@@ -634,7 +693,7 @@ def _get_user_info_resilient(
 	all_cookies: dict,
 	*,
 	use_proxy: bool,
-	browser_cache: dict,
+	browser_cache: dict[str, dict | None],
 	propagate_network_error: bool = True,
 ) -> dict:
 	"""httpx 取用户信息；被阿里云 WAF 挑战时改用真浏览器兜底。
@@ -658,17 +717,26 @@ def _get_user_info_resilient(
 				all_cookies,
 				use_proxy=use_proxy,
 			)
-		if browser_cache.get('browser_info'):
-			log.info(f'{account_name}: 浏览器兜底获取余额成功: {browser_cache["browser_info"]["display"]}')
-			return browser_cache['browser_info']
+		browser_info = browser_cache.get('browser_info')
+		if browser_info:
+			log.info(f'{account_name}: 浏览器兜底获取余额成功: {browser_info["display"]}')
+			return browser_info
 		if propagate_network_error:
 			raise
 		return {'success': False, 'error': f'余额查询失败（WAF/网络异常）: {str(e)[:50]}'}
 
 
-async def prepare_cookies(account_name: str, provider_config, user_cookies: dict) -> dict | None:
+async def prepare_cookies(
+	account_name: str,
+	provider_config,
+	user_cookies: dict,
+	*,
+	use_proxy: bool | None = None,
+) -> dict | None:
 	"""准备请求所需的 cookies（可能包含 WAF cookies）"""
 	waf_cookies = {}
+	if use_proxy is None:
+		use_proxy = provider_config.use_proxy
 
 	if provider_config.needs_waf_cookies():
 		login_url = f'{provider_config.domain}{provider_config.login_path}'
@@ -676,7 +744,7 @@ async def prepare_cookies(account_name: str, provider_config, user_cookies: dict
 			account_name,
 			login_url,
 			provider_config.waf_cookie_names,
-			use_proxy=provider_config.use_proxy,
+			use_proxy=use_proxy,
 		)
 		if not waf_cookies:
 			log.failed(f'{account_name}: 无法获取 WAF cookies')
@@ -695,7 +763,19 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 	checkin_headers.update({'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'})
 
 	sign_in_url = f'{provider_config.domain}{provider_config.sign_in_path}'
-	response = request_with_retry(client, 'POST', sign_in_url, headers=checkin_headers, timeout=30)
+	try:
+		# 签到 POST 默认不重试：网络中断时结果未知，重复提交比晚些时候由重试工作流补签更危险。
+		response = request_with_retry(
+			client,
+			'POST',
+			sign_in_url,
+			headers=checkin_headers,
+			timeout=30,
+			retry_non_idempotent=False,
+		)
+	except _NETWORK_ERRORS as e:
+		log.failed(f'{account_name}: 签到请求网络异常，结果未知，不自动重复提交: {str(e)[:80]}')
+		return False
 
 	log.debug(f'{account_name}: 响应状态码 {response.status_code}')
 
@@ -808,6 +888,18 @@ async def check_in_account(
 		log.failed(f'{account_name}: 提供商 "{account.provider}" 未在配置中找到')
 		return False, None, {'success': False, 'error': f'提供商 "{account.provider}" 未在配置中找到'}
 
+	allow_direct_fallback = getattr(provider_config, 'allow_direct_fallback', True)
+	if provider_config.use_proxy and not allow_direct_fallback:
+		if force_direct:
+			reason = '直连回退已禁用'
+		elif not get_proxy_server(use_proxy=True):
+			reason = '未检测到可用代理'
+		else:
+			reason = ''
+		if reason:
+			log.failed(f'{account_name}: {provider_config.name} {reason}，跳过签到')
+			return False, None, {'success': False, 'error': f'{provider_config.name} {reason}，无法执行签到'}
+
 	proxy_mode = '走代理' if (provider_config.use_proxy and not force_direct) else '直连'
 	log.info(f'{account_name}: 使用提供商 "{account.provider}" ({provider_config.domain})，{proxy_mode}')
 
@@ -898,12 +990,14 @@ async def check_in_account(
 	elif account.has_login_credentials():
 		log.detail(f'{account_name}: 正在尝试邮箱密码登录 (优先)...')
 		assert account.email is not None and account.password is not None
+		login_kwargs = {'force_direct': True} if force_direct else {}
 		login_result = await login_with_credentials(
 			account_name,
 			provider_config,
 			account.provider,
 			account.email,
 			account.password,
+			**login_kwargs,
 		)
 		if login_result:
 			all_cookies = login_result.cookies
@@ -917,11 +1011,14 @@ async def check_in_account(
 		if not user_cookies:
 			log.failed(f'{account_name}: 配置格式无效')
 			return False, None, {'success': False, 'error': '账号配置格式无效（无有效凭据）'}
-		all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
+		prepare_kwargs = {'use_proxy': False} if force_direct else {}
+		all_cookies = await prepare_cookies(account_name, provider_config, user_cookies, **prepare_kwargs)
 		auth_method = 'session cookies'
 
-	if not all_cookies and not resolved_bearer_token:
-		return False, None, {'success': False, 'error': 'cookies 准备失败（WAF cookies 获取失败，详见运行日志）'}
+	if not all_cookies:
+		if not resolved_bearer_token:
+			return False, None, {'success': False, 'error': 'cookies 准备失败（WAF cookies 获取失败，详见运行日志）'}
+		all_cookies = {}
 
 	log.detail(f'{account_name}: 使用认证方式 -> {auth_method}')
 
@@ -983,7 +1080,7 @@ def run_check_in_requests(
 
 			user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
 			# httpx 取余额；被阿里云 WAF 挑战时用真浏览器兜底（能解 JS 挑战）
-			browser_cache: dict = {}
+			browser_cache: dict[str, dict | None] = {}
 
 			if not provider_config.needs_manual_check_in():
 				# 自动签到型（agentrouter/gorouter）：走到这里意味着登录已成功，
@@ -1069,16 +1166,20 @@ async def check_in_account_with_retry(
 	最多 PROXY_RETRY_TIMES 次（默认 3）。若节点选择器已无可用节点，则直连兜底一次。
 	"""
 	provider_config = app_config.get_provider(account.provider)
-	uses_proxy = bool(provider_config and provider_config.use_proxy)
-	if not uses_proxy or node_selector is None:
+	if provider_config is None or not provider_config.use_proxy or node_selector is None:
 		return await check_in_account(account, account_index, app_config)
 
 	account_name = account.get_display_name(account_index)
+	allow_direct_fallback = getattr(provider_config, 'allow_direct_fallback', True)
 	max_retries = int(os.getenv('PROXY_RETRY_TIMES', '3').strip() or 3)
 	proxy_url = os.getenv('CHECKIN_PROXY_URL', '').strip()
 
 	# 已知无可用代理节点：直接直连，避免先用默认节点白试一次代理
 	if no_available_node():
+		if not allow_direct_fallback:
+			error = f'{provider_config.name} 代理节点不可用，且已禁用直连回退'
+			log.failed(f'{account_name}: {error}')
+			return False, None, {'success': False, 'error': error}
 		log.warn(f'{account_name}: 无可用代理节点，直接尝试直连')
 		return await check_in_account(account, account_index, app_config, force_direct=True)
 
@@ -1100,6 +1201,10 @@ async def check_in_account_with_retry(
 
 			new_node = node_selector.select_node(proxy_url)
 			if new_node is None:
+				if not allow_direct_fallback:
+					error = f'{provider_config.name} 代理节点耗尽，且已禁用直连回退'
+					log.failed(f'{account_name}: {error}')
+					return False, None, {'success': False, 'error': error}
 				log.warn(f'{account_name}: 无可用代理节点，尝试直连一次')
 				return await check_in_account(account, account_index, app_config, force_direct=True)
 
@@ -1148,19 +1253,38 @@ async def main():
 
 	log.info(f'发现 {len(accounts)} 个账号配置' + ('（重试模式）' if is_retry else ''))
 
+	def has_strict_proxy() -> bool:
+		for candidate in accounts:
+			provider = app_config.get_provider(candidate.provider)
+			if provider is not None and provider.use_proxy and not getattr(provider, 'allow_direct_fallback', True):
+				return True
+		return False
+
 	# 初始化代理节点选择器；仅当存在 use_proxy=true 的账号需要代理时才选初始节点
 	node_selector = NodeSelector() if available() else None
 	if needs_proxy(app_config, accounts):
 		if node_selector is None:
-			log.warn('存在使用代理的账号，但未检测到 mihomo controller；相关账号将尝试直连')
+			strict_proxy = has_strict_proxy()
+			if strict_proxy:
+				log.warn('存在严格代理账号，但未检测到 mihomo controller；相关账号将跳过直连并失败')
+			else:
+				log.warn('存在使用代理的账号，但未检测到 mihomo controller；相关账号将尝试直连')
 		else:
 			proxy_url = os.getenv('CHECKIN_PROXY_URL', '').strip()
 			if proxy_url:
 				initial_node = node_selector.select_node(proxy_url)
 				if initial_node is None:
-					log.warn('无可用的代理节点，使用代理的账号将尝试直连')
+					strict_proxy = has_strict_proxy()
+					if strict_proxy:
+						log.warn('无可用的代理节点；严格代理账号将跳过直连并失败')
+					else:
+						log.warn('无可用的代理节点，使用代理的账号将尝试直连')
 			else:
-				log.warn('存在使用代理的账号，但未设置 CHECKIN_PROXY_URL')
+				strict_proxy = has_strict_proxy()
+				if strict_proxy:
+					log.warn('存在严格代理账号，但未设置 CHECKIN_PROXY_URL；相关账号将跳过直连并失败')
+				else:
+					log.warn('存在使用代理的账号，但未设置 CHECKIN_PROXY_URL')
 	else:
 		log.detail('所有账号均不使用代理，跳过代理节点选择')
 
@@ -1214,6 +1338,8 @@ async def main():
 			if user_info_after and user_info_after.get('success'):
 				current_quota = user_info_after['quota']
 				current_used = user_info_after['used_quota']
+				# 余额哈希继续使用原始索引，兼容升级前的 balance_hash.txt；
+				# 跨日快照另用 account_snapshot_key，避免显示名冲突。
 				current_balances[account_key] = {'quota': current_quota, 'used': current_used}
 
 				if user_info_before and user_info_before.get('success'):
@@ -1240,7 +1366,11 @@ async def main():
 				cross_day_estimated = False
 				provider_cfg = app_config.get_provider(account.provider)
 				if provider_cfg and not provider_cfg.needs_manual_check_in():
-					prev_total = balance_snapshot.get(account.get_display_name(i))
+					snapshot_key = account_snapshot_key(account, i)
+					# 兼容升级前以显示名保存的快照；新写入统一使用稳定脱敏键。
+					prev_total = balance_snapshot.get(snapshot_key)
+					if prev_total is None:
+						prev_total = balance_snapshot.get(account.get_display_name(i))
 					if prev_total is not None:
 						cross_day_reward = total_after - prev_total
 						if cross_day_reward > 0:
@@ -1327,16 +1457,18 @@ async def main():
 				notification_content.append((i, format_check_in_notification(account_check_in_details[account_key])))
 				notified_account_keys.add(account_key)
 
-	if current_balance_hash:
-		save_balance_hash(current_balance_hash)
-
-	# 更新跨日总额快照：仅成功取到余额的账号写入最新总额，供次日还原自动签到奖励
+	# 先构造待提交的跨日快照；只有通知状态允许提交时才覆盖旧基线。
+	next_balance_snapshot = dict(balance_snapshot)
 	for i, account in original_accounts:
-		account_key = f'account_{i + 1}'
-		if account_key in current_balances:
-			bal = current_balances[account_key]
-			balance_snapshot[account.get_display_name(i)] = bal['quota'] + bal['used']
-	save_balance_snapshot(balance_snapshot)
+		balance_key = f'account_{i + 1}'
+		if balance_key in current_balances:
+			bal = current_balances[balance_key]
+			snapshot_key = account_snapshot_key(account, i)
+			next_balance_snapshot[snapshot_key] = bal['quota'] + bal['used']
+			# 成功处理过的账号迁移掉旧版显示名键，避免重复和同名冲突。
+			legacy_key = account.get_display_name(i)
+			if legacy_key != snapshot_key:
+				next_balance_snapshot.pop(legacy_key, None)
 
 	# 签到总结：无论是否发通知都输出，用专门的分隔符标出，便于一眼看清整体结果
 	log.info('==================== [签到总结] ====================')
@@ -1348,6 +1480,7 @@ async def main():
 	else:
 		log.failed('全部账号签到失败')
 
+	notification_result: bool | None = None
 	if need_notify and notification_content:
 		summary = [
 			'**📊 统计**',
@@ -1384,14 +1517,30 @@ async def main():
 		else:
 			notify_title = f'每日签到完成，成功 {success_count}，失败 {total_count - success_count}'
 		# Markdown 正文（NotifyX/飞书等直接渲染；纯文本渠道由 notify 层降级）
-		if notify.push_message(
+		notification_result = notify.push_message(
 			notify_title, notify_content, msg_type='markdown', description=f'成功 {success_count}/{total_count}'
-		):
+		)
+		if notification_result is True:
 			log.notify('通知已发送')
+		elif notification_result is False:
+			log.warn('所有已配置通知渠道均发送失败，余额状态将在下次运行重试通知')
+		else:
+			log.detail('未配置通知渠道，仍保存余额状态')
 	elif need_notify:
 		log.warn('有失败或余额变化，但缺少通知内容，未发送通知')
 	else:
 		log.info('未检测到余额变化，跳过通知')
+
+	# 通知成功（或没有配置通知渠道）后再提交状态；全部通知失败时保留旧基线，
+	# 让下一次运行重新生成并发送同一份变化通知。
+	state_commit_allowed = not need_notify or (bool(notification_content) and notification_result is not False)
+	if state_commit_allowed:
+		if current_balance_hash:
+			save_balance_hash(current_balance_hash)
+		if current_balance_hash or next_balance_snapshot != balance_snapshot:
+			save_balance_snapshot(next_balance_snapshot)
+	else:
+		log.warn('余额状态未提交，保留旧通知基线')
 	log.info('====================================================')
 
 	# 落盘本次结果，供每日重试工作流判断哪些账号需要补签

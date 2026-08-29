@@ -83,6 +83,25 @@ def test_provider_from_dict_inherits_profile_persistence_from_defaults():
 	assert provider.persist_profile is True
 
 
+def test_provider_from_dict_inherits_direct_fallback_from_defaults():
+	defaults = ProviderConfig(name='custom', domain='https://old.example.com', allow_direct_fallback=False)
+
+	provider = ProviderConfig.from_dict('custom', {'domain': 'https://new.example.com'}, defaults=defaults)
+
+	assert provider.allow_direct_fallback is False
+
+
+def test_provider_direct_fallback_can_be_overridden(monkeypatch):
+	monkeypatch.setenv(
+		'PROVIDERS',
+		json.dumps({'agentrouter': {'allow_direct_fallback': False}}),
+	)
+
+	config = AppConfig.load_from_env()
+
+	assert config.providers['agentrouter'].allow_direct_fallback is False
+
+
 def test_provider_from_dict_inherits_domain_from_defaults():
 	"""PROVIDERS 仅覆盖 use_proxy（缺 domain）时应从内置默认继承 domain，不再整个跳过。"""
 	defaults = ProviderConfig(name='gptgod', domain='https://gptgod.online', use_proxy=False)

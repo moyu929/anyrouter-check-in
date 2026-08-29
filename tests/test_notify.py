@@ -180,7 +180,29 @@ def test_push_message(notification_kit, monkeypatch):
 		mocks[method_name] = method_mock
 		monkeypatch.setattr(notification_kit, method_name, method_mock)
 
-	notification_kit.push_message('测试标题', '测试内容')
+	assert notification_kit.push_message('测试标题', '测试内容') is True
 
 	for method_mock in mocks.values():
 		assert method_mock.called
+
+
+def test_push_message_returns_none_without_config(monkeypatch):
+	for name in (
+		'EMAIL_USER',
+		'EMAIL_PASS',
+		'EMAIL_TO',
+		'PUSHPLUS_TOKEN',
+		'SERVERPUSHKEY',
+		'DINGDING_WEBHOOK',
+		'FEISHU_WEBHOOK',
+		'WEIXIN_WEBHOOK',
+		'GOTIFY_URL',
+		'GOTIFY_TOKEN',
+		'TELEGRAM_BOT_TOKEN',
+		'TELEGRAM_CHAT_ID',
+		'BARK_KEY',
+		'NOTIFYX_KEY',
+	):
+		monkeypatch.delenv(name, raising=False)
+
+	assert NotificationKit().push_message('标题', '正文') is None

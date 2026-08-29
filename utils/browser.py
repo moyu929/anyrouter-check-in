@@ -144,6 +144,9 @@ _OPEN_EMAIL_FORM_JS = """() => {
 class BrowserLoginResult:
 	cookies: dict[str, str]
 	api_user: str | None = None
+	# 新版 new-api（gorouter 2026-08 起）回调返回的 JWT access_token：
+	# 站点不再依赖 session cookie 鉴权，后续 API 需带 Authorization: Bearer
+	bearer_token: str | None = None
 
 
 @dataclass(frozen=True)

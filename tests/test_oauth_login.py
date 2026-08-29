@@ -1,5 +1,6 @@
 """GitHub OAuth 重放登录测试（MockTransport 拦截 GitHub 与站点，全程离线）。"""
 
+import json
 import sys
 from pathlib import Path
 
@@ -52,12 +53,15 @@ class _OAuthServer:
 
 	def __call__(self, request: httpx.Request) -> httpx.Response:
 		self.requests.append(request)
-		host, path = request.url.host, request.url.path
+		host, path, method = request.url.host, request.url.path, request.method
 
 		if host == 'github.com':
 			return httpx.Response(self.gh_status, headers={'Location': self.gh_location})
 
 		if path == '/api/oauth/state':
+			# 旧版后端只注册了 GET 路由：POST 探测请求按 405 处理（模拟未升级站点）
+			if method == 'POST':
+				return httpx.Response(405, text='method not allowed')
 			if self.state_text is not None:
 				return httpx.Response(self.state_status, text=self.state_text)
 			return httpx.Response(
@@ -110,10 +114,13 @@ class TestLoginWithGithubOauth:
 		await run_oauth(server)
 
 		urls = [str(r.url) for r in server.requests]
-		assert urls[0] == 'https://demo.example.com/api/oauth/state?mode=login'
-		assert 'client_id=client123' in urls[1]
-		assert 'state=st-1' in urls[1]
-		assert urls[2] == 'https://demo.example.com/api/oauth/github?code=abc123&state=st-1&mode=login'
+		# 先 POST 探测新版协议（旧版后端返回 405），再回退旧版 GET
+		assert urls[0] == 'https://demo.example.com/api/oauth/state'
+		assert server.requests[0].method == 'POST'
+		assert urls[1] == 'https://demo.example.com/api/oauth/state?mode=login'
+		assert 'client_id=client123' in urls[2]
+		assert 'state=st-1' in urls[2]
+		assert urls[3] == 'https://demo.example.com/api/oauth/github?code=abc123&state=st-1&mode=login'
 
 	async def test_github_session_cookie_is_sent_to_github(self, run_oauth):
 		server = _OAuthServer()
@@ -212,6 +219,144 @@ class TestLoginWithGithubOauth:
 
 		assert result is not None
 		assert result.api_user is None
+
+
+class _NewOAuthServer(_OAuthServer):
+	"""新版 new-api 后端（gorouter 2026-08 起）。
+
+	POST /api/oauth/state（body {provider, intent}）→ data={flow_token,...}；
+	authorize 带 scope=user:email；回调 GET /api/oauth/github?code&state（无 mode），
+	返回 data={access_token, user}。
+	"""
+
+	def __init__(self, *, state_data=None, **kwargs):
+		super().__init__(
+			cb_payload={
+				'success': True,
+				'data': {
+					'access_token': 'jwt-access-token',
+					'token_type': 'bearer',
+					'user': {'id': 17081},
+					'session': {'sid': 's-1', 'current': True},
+				},
+			},
+			**kwargs,
+		)
+		self.state_data = state_data if state_data is not None else {'flow_token': 'flow-token-1', 'expires_at': 123}
+
+	def __call__(self, request: httpx.Request) -> httpx.Response:
+		self.requests.append(request)
+		host, path, method = request.url.host, request.url.path, request.method
+		if host == 'github.com':
+			return httpx.Response(self.gh_status, headers={'Location': self.gh_location})
+		if path == '/api/oauth/state' and method == 'POST':
+			return httpx.Response(200, json={'success': True, 'data': self.state_data})
+		if path == '/api/oauth/github':
+			return httpx.Response(
+				self.cb_status,
+				json=self.cb_payload,
+				headers={'set-cookie': 'new_api_refresh=rt; Path=/'},
+			)
+		return httpx.Response(404)
+
+
+class TestNewProtocolOauth:
+	"""新版 new-api OAuth 协议：POST state + flow_token + scope + Bearer。"""
+
+	@pytest.fixture
+	def run_new_oauth(self, monkeypatch):
+		monkeypatch.setattr('utils.http_client.time.sleep', lambda _s: None)
+
+		async def run(server: _NewOAuthServer):
+			monkeypatch.setattr(
+				checkin_module,
+				'create_client',
+				lambda **_kwargs: httpx.Client(transport=httpx.MockTransport(server)),
+			)
+			return await login_with_github_oauth('Account 1', PROVIDER, FAKE_GH_SESSION)
+
+		return run
+
+	async def test_happy_path_returns_bearer_and_user_id(self, run_new_oauth):
+		server = _NewOAuthServer()
+
+		result = await run_new_oauth(server)
+
+		assert result is not None
+		assert result.api_user == '17081'
+		assert result.bearer_token == 'jwt-access-token'
+		assert result.cookies.get('new_api_refresh') == 'rt'
+
+	async def test_sequence_uses_post_state_scope_and_no_mode(self, run_new_oauth):
+		server = _NewOAuthServer()
+
+		await run_new_oauth(server)
+
+		requests = server.requests
+		assert requests[0].method == 'POST'
+		assert str(requests[0].url) == 'https://demo.example.com/api/oauth/state'
+		assert json.loads(requests[0].content) == {'provider': 'github', 'intent': 'login'}
+		auth_url = str(requests[1].url)
+		assert 'client_id=client123' in auth_url
+		assert 'state=flow-token-1' in auth_url
+		assert 'scope=user%3Aemail' in auth_url
+		callback_url = str(requests[2].url)
+		assert callback_url == 'https://demo.example.com/api/oauth/github?code=abc123&state=flow-token-1'
+
+	async def test_string_state_data_also_accepted(self, run_new_oauth):
+		"""POST 探测成功但 data 为字符串（中间版本）也应接受。"""
+		server = _NewOAuthServer(state_data='plain-state')
+
+		result = await run_new_oauth(server)
+
+		assert result is not None
+		assert 'state=plain-state' in str(server.requests[1].url)
+
+	async def test_post_waf_html_falls_back_to_get(self, monkeypatch):
+		"""POST 探测被 WAF 拦截页命中时回退旧版 GET，不得抛节点异常。"""
+		monkeypatch.setattr('utils.http_client.time.sleep', lambda _s: None)
+
+		class WafPostServer(_OAuthServer):
+			def __call__(self, request: httpx.Request) -> httpx.Response:
+				if request.url.path == '/api/oauth/state' and request.method == 'POST':
+					self.requests.append(request)
+					return httpx.Response(200, text='<html>aliyun_waf_aa challenge</html>')
+				return super().__call__(request)
+
+		server = WafPostServer()
+		monkeypatch.setattr(
+			checkin_module,
+			'create_client',
+			lambda **_kwargs: httpx.Client(transport=httpx.MockTransport(server)),
+		)
+
+		result = await login_with_github_oauth('Account 1', PROVIDER, FAKE_GH_SESSION)
+
+		assert result is not None
+		assert result.bearer_token is None
+		# 回退旧版 GET：回调仍带 mode=login
+		assert 'mode=login' in str(server.requests[-1].url)
+
+	async def test_post_500_raises_node_issue(self, monkeypatch):
+		"""POST 探测遇 5xx 视为节点问题，触发上层节点切换重试。"""
+		monkeypatch.setattr('utils.http_client.time.sleep', lambda _s: None)
+
+		class ServerErrorPostServer(_OAuthServer):
+			def __call__(self, request: httpx.Request) -> httpx.Response:
+				if request.url.path == '/api/oauth/state' and request.method == 'POST':
+					self.requests.append(request)
+					return httpx.Response(502)
+				return super().__call__(request)
+
+		server = ServerErrorPostServer()
+		monkeypatch.setattr(
+			checkin_module,
+			'create_client',
+			lambda **_kwargs: httpx.Client(transport=httpx.MockTransport(server)),
+		)
+
+		with pytest.raises(checkin_module.ProxyNodeIssue):
+			await login_with_github_oauth('Account 1', PROVIDER, FAKE_GH_SESSION)
 
 
 class TestOauthThenManualCheckin:
@@ -318,3 +463,73 @@ class TestOauthThenManualCheckin:
 		# 登录失败后不发起任何站点签到/余额请求
 		assert all(r.url.host != 'www.cun.ai' or r.url.path == '/api/oauth/state' for r in requests_log)
 		assert not any(r.url.path == '/api/user/checkin' for r in requests_log)
+
+
+class TestNewProtocolAutoCheckin:
+	"""gorouter 新版形态端到端：新版 OAuth + 自动签到（sign_in_path=None）+ Bearer 鉴权。
+
+	新版后端 /api/user/self 不再认 session cookie，必须带 Authorization: Bearer；
+	签到奖励随登录由服务端自动发放（签到日历接口已真实验证）。
+	"""
+
+	async def test_gorouter_new_protocol_flow(self, monkeypatch):
+		monkeypatch.setattr('utils.http_client.time.sleep', lambda _s: None)
+		monkeypatch.delenv('PROVIDERS', raising=False)
+		provider = AppConfig.load_from_env().get_provider('gorouter')
+		assert provider is not None and provider.needs_manual_check_in() is False
+
+		requests_log: list[httpx.Request] = []
+
+		def router(req: httpx.Request) -> httpx.Response:
+			requests_log.append(req)
+			host, path, method = req.url.host, req.url.path, req.method
+			if host == 'github.com':
+				return httpx.Response(
+					302, headers={'Location': f'{provider.domain}/oauth/github?code=abc123&state=ft-1'}
+				)
+			if path == '/api/oauth/state':
+				if method == 'POST':
+					return httpx.Response(200, json={'success': True, 'data': {'flow_token': 'ft-1'}})
+				return httpx.Response(405)
+			if path == '/api/oauth/github':
+				return httpx.Response(
+					200,
+					json={
+						'success': True,
+						'data': {'access_token': 'jwt-tok', 'user': {'id': 17081, 'quota': 14015033}},
+					},
+					headers={'set-cookie': 'new_api_refresh=rt; Path=/'},
+				)
+			if path == '/api/user/self':
+				auth = req.headers.get('authorization', '')
+				if auth != 'Bearer jwt-tok':
+					return httpx.Response(401, json={'success': False, 'code': 'AUTH_UNAUTHORIZED'})
+				count = sum(1 for r in requests_log if r.url.path == '/api/user/self')
+				quota = 14015033 if count <= 1 else 18837341
+				return httpx.Response(200, json={'success': True, 'data': {'quota': quota, 'used_quota': 78450000}})
+			return httpx.Response(404, text=f'unhandled {path}')
+
+		monkeypatch.setattr(
+			checkin_module, 'create_client', lambda **_kw: httpx.Client(transport=httpx.MockTransport(router))
+		)
+
+		account = AccountConfig(cookies=None, github_session='fake-gh', provider='gorouter', name='gorouter')
+		app_config = AppConfig(providers={'gorouter': provider})
+
+		ok, before, after = await checkin_module.check_in_account(account, 0, app_config)
+
+		assert ok is True
+		assert before is not None and before['quota'] == 28.03
+		assert after is not None and after['quota'] == 37.67
+
+		# 序列：POST state → github → 回调（无 mode）→ self×2（自动签到型不发 checkin）
+		paths = [(r.url.host, r.method, r.url.path) for r in requests_log]
+		assert paths == [
+			('gorouter.app', 'POST', '/api/oauth/state'),
+			('github.com', 'GET', '/login/oauth/authorize'),
+			('gorouter.app', 'GET', '/api/oauth/github'),
+			('gorouter.app', 'GET', '/api/user/self'),
+			('gorouter.app', 'GET', '/api/user/self'),
+		]
+		# authorize 带 scope（与站点前端一致）
+		assert 'scope=user%3Aemail' in str(requests_log[1].url)

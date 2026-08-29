@@ -337,6 +337,21 @@ async def login_with_credentials(
 			await context.close()
 
 
+def _extract_oauth_state(state_data: object) -> str | None:
+	"""从 OAuth state 接口响应的 data 字段提取 state 值。
+
+	兼容两种形态：旧版 data 为字符串；新版（gorouter 2026-08 起）为
+	{"flow_token": ..., "expires_at": ...} 对象。
+	"""
+	if isinstance(state_data, str) and state_data:
+		return state_data
+	if isinstance(state_data, dict):
+		token = state_data.get('flow_token')
+		if isinstance(token, str) and token:
+			return token
+	return None
+
+
 async def login_with_github_oauth(
 	account_name: str,
 	provider_config,
@@ -345,6 +360,12 @@ async def login_with_github_oauth(
 	force_direct: bool = False,
 ) -> BrowserLoginResult | None:
 	"""使用 GitHub OAuth 重放登录，返回 cookies 与 api_user。
+
+	自动探测站点协议版本：
+	  * 新版 new-api（gorouter 2026-08 起）：POST /api/oauth/state（body 带 provider），
+	    state 取响应 data.flow_token；authorize 带 scope=user:email；回调不带 mode；
+	    回调返回 JWT access_token，后续 API 走 Bearer 鉴权（session cookie 已失效）。
+	  * 旧版：GET /api/oauth/state?mode=login，data 为字符串；回调带 mode=login。
 
 	参数:
 	  force_direct: 强制直连（忽略代理）。用于节点耗尽后的兜底重试。
@@ -366,47 +387,75 @@ async def login_with_github_oauth(
 	github_client_id = provider_config.oauth_client_id
 
 	with client:
-		# Step 1: 获取 OAuth state（同时获取 acw_tc WAF cookie）
+		# Step 1: 获取 OAuth state（先探测新版 POST 协议，未升级站点回退旧版 GET）
 		log.debug(f'{account_name}: 第1步 - 获取 OAuth 状态...')
-		state_url = f'{domain}{provider_config.oauth_state_path}?mode=login'
+		state_url = f'{domain}{provider_config.oauth_state_path}'
+		state = None
+		new_protocol = False
 		try:
-			resp = request_with_retry(client, 'GET', state_url, timeout=30)
+			probe_resp = request_with_retry(
+				client, 'POST', state_url, json={'provider': 'github', 'intent': 'login'}, timeout=30
+			)
 		except Exception as e:
 			if _is_node_issue_exception(e):
 				raise ProxyNodeIssue(f'OAuth 状态请求异常（可能节点问题）: {e}') from e
 			log.failed(f'{account_name}: OAuth 状态请求失败: {e}')
 			return None
 
-		if resp.status_code != 200:
-			log.failed(f'{account_name}: OAuth 状态返回 HTTP {resp.status_code}')
-			return None
+		# 新版协议探测：仅接受 200 + JSON + success + 可提取 state 的响应；
+		# 旧版站点会返回 405/400/WAF 拦截页，一律回退旧版 GET
+		if probe_resp.status_code == 200 and _WAF_BLOCK_MARKER not in probe_resp.text:
+			try:
+				probe_data = probe_resp.json()
+			except Exception:
+				probe_data = None
+			if isinstance(probe_data, dict) and probe_data.get('success'):
+				extracted = _extract_oauth_state(probe_data.get('data'))
+				if extracted:
+					state = extracted
+					new_protocol = True
+					log.detail(f'{account_name}: 站点使用新版 OAuth 协议（POST state）')
 
-		# WAF 拦截检测（与原始项目一致）
-		if _WAF_BLOCK_MARKER in resp.text:
-			raise ProxyNodeIssue(f'{account_name}: 被阿里云 WAF 拦截，请尝试使用代理')
+		if not new_protocol:
+			try:
+				resp = request_with_retry(client, 'GET', f'{state_url}?mode=login', timeout=30)
+			except Exception as e:
+				if _is_node_issue_exception(e):
+					raise ProxyNodeIssue(f'OAuth 状态请求异常（可能节点问题）: {e}') from e
+				log.failed(f'{account_name}: OAuth 状态请求失败: {e}')
+				return None
 
-		try:
-			state_data = resp.json()
-		except Exception:
-			log.failed(f'{account_name}: OAuth 状态响应非 JSON 格式')
-			return None
+			if resp.status_code != 200:
+				log.failed(f'{account_name}: OAuth 状态返回 HTTP {resp.status_code}')
+				return None
 
-		if not state_data.get('success'):
-			log.failed(f'{account_name}: OAuth 状态失败: {state_data}')
-			return None
+			# WAF 拦截检测（与原始项目一致）
+			if _WAF_BLOCK_MARKER in resp.text:
+				raise ProxyNodeIssue(f'{account_name}: 被阿里云 WAF 拦截，请尝试使用代理')
 
-		state = state_data.get('data', '')
-		if not state:
-			log.failed(f'{account_name}: OAuth 状态为空')
-			return None
+			try:
+				state_data = resp.json()
+			except Exception:
+				log.failed(f'{account_name}: OAuth 状态响应非 JSON 格式')
+				return None
 
-		log.detail(f'{account_name}: 获取到 OAuth 状态（cookies: {list(client.cookies.keys())}）')
+			if not state_data.get('success'):
+				log.failed(f'{account_name}: OAuth 状态失败: {state_data}')
+				return None
 
-		# Step 2: 用 GitHub user_session 获取授权 code
+			state = state_data.get('data', '')
+			if not state:
+				log.failed(f'{account_name}: OAuth 状态为空')
+				return None
+
+			log.detail(f'{account_name}: 获取到 OAuth 状态（cookies: {list(client.cookies.keys())}）')
+
+		# Step 2: 用 GitHub user_session 获取授权 code（新版与站点前端一致带 scope）
 		log.debug(f'{account_name}: 第2步 - 获取 GitHub OAuth code...')
-		auth_url = (
-			f'https://github.com/login/oauth/authorize?{urlencode({"client_id": github_client_id, "state": state})}'
-		)
+		auth_params: dict[str, str] = {'client_id': github_client_id, 'state': state}
+		if new_protocol:
+			auth_params['scope'] = 'user:email'
+		auth_url = f'https://github.com/login/oauth/authorize?{urlencode(auth_params)}'
 		try:
 			# 用显式 Cookie 头而非 per-request cookies=（后者已被 httpx 弃用），
 			# 同时避免 GitHub 会话进入 client 的 cookie jar 后被带到站点域。
@@ -441,10 +490,12 @@ async def login_with_github_oauth(
 		code = code_match.group(1)
 		log.detail(f'{account_name}: 获取到 GitHub OAuth code')
 
-		# Step 3: OAuth 回调，触发登录+签到
+		# Step 3: OAuth 回调，触发登录+签到（新版协议不带 mode 参数）
 		log.debug(f'{account_name}: 第3步 - OAuth 回调...')
-		callback_query = urlencode({'code': code, 'state': state, 'mode': 'login'})
-		callback_url = f'{domain}{provider_config.oauth_callback_path}?{callback_query}'
+		callback_params: dict[str, str] = {'code': code, 'state': state}
+		if not new_protocol:
+			callback_params['mode'] = 'login'
+		callback_url = f'{domain}{provider_config.oauth_callback_path}?{urlencode(callback_params)}'
 		try:
 			cb_resp = request_with_retry(client, 'GET', callback_url, timeout=30)
 		except Exception as e:
@@ -472,13 +523,25 @@ async def login_with_github_oauth(
 			return None
 
 		user_data = cb_data.get('data', {})
-		api_user = str(user_data.get('id')) if user_data.get('id') is not None else None
-		checked_in = user_data.get('checked_in', False)
-		log.detail(f'{account_name}: 登录成功，已签到状态={checked_in}')
+		# api_user：新版在 data.user.id，旧版在 data.id
+		user_obj = user_data.get('user') if isinstance(user_data, dict) else None
+		if isinstance(user_obj, dict) and user_obj.get('id') is not None:
+			api_user = str(user_obj['id'])
+		elif isinstance(user_data, dict) and user_data.get('id') is not None:
+			api_user = str(user_data['id'])
+		else:
+			api_user = None
+		# 新版回调返回 JWT access_token，后续 API 需 Bearer 鉴权
+		bearer_token = user_data.get('access_token') if isinstance(user_data, dict) else None
+		checked_in = user_data.get('checked_in') if isinstance(user_data, dict) else None
+		if checked_in is not None:
+			log.detail(f'{account_name}: 登录成功，已签到状态={checked_in}')
+		else:
+			log.detail(f'{account_name}: 登录成功（{"新版 JWT 鉴权" if bearer_token else "无用户信息"}）')
 
 		all_cookies = _cookies_for_domain(client, domain)
 		log.success(f'{account_name}: OAuth 登录成功，获取到 {len(all_cookies)} 个 cookies')
-		return BrowserLoginResult(cookies=all_cookies, api_user=api_user)
+		return BrowserLoginResult(cookies=all_cookies, api_user=api_user, bearer_token=bearer_token)
 
 
 def get_user_info(client, headers, user_info_url: str, *, propagate_network_error: bool = True):
@@ -813,6 +876,7 @@ async def check_in_account(
 	# 优先使用 OAuth 登录（如 GitHub OAuth）
 	all_cookies = None
 	resolved_api_user: str | None = None
+	resolved_bearer_token: str | None = None
 	auth_method = None
 	if provider_config.is_oauth() and account.has_oauth_credentials():
 		log.detail(f'{account_name}: 正在尝试 OAuth 登录 (github_session)...')
@@ -826,6 +890,7 @@ async def check_in_account(
 		if login_result:
 			all_cookies = login_result.cookies
 			resolved_api_user = login_result.api_user
+			resolved_bearer_token = login_result.bearer_token
 			auth_method = 'GitHub OAuth'
 		else:
 			log.failed(f'{account_name}: OAuth 登录失败')
@@ -855,7 +920,7 @@ async def check_in_account(
 		all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
 		auth_method = 'session cookies'
 
-	if not all_cookies:
+	if not all_cookies and not resolved_bearer_token:
 		return False, None, {'success': False, 'error': 'cookies 准备失败（WAF cookies 获取失败，详见运行日志）'}
 
 	log.detail(f'{account_name}: 使用认证方式 -> {auth_method}')
@@ -866,6 +931,7 @@ async def check_in_account(
 		account_name,
 		provider_config,
 		api_user_override=resolved_api_user,
+		bearer_token=resolved_bearer_token,
 		use_proxy=provider_config.use_proxy and not force_direct,
 	)
 
@@ -877,9 +943,14 @@ def run_check_in_requests(
 	provider_config,
 	*,
 	api_user_override: str | None = None,
+	bearer_token: str | None = None,
 	use_proxy: bool = False,
 ) -> tuple[bool, dict | None, dict | None]:
-	"""执行 HTTP 签到请求（同步，避免在 async 上下文中使用阻塞 httpx）。"""
+	"""执行 HTTP 签到请求（同步，避免在 async 上下文中使用阻塞 httpx）。
+
+	bearer_token：新版 new-api 站点（gorouter 2026-08 起）OAuth 回调返回的 JWT，
+	存在时请求带 Authorization: Bearer（session cookie 已不参与鉴权）。
+	"""
 	try:
 		client = create_client(
 			headers={
@@ -907,6 +978,8 @@ def run_check_in_requests(
 			api_user = api_user_override or account.api_user
 			if api_user and provider_config.api_user_key:
 				headers[provider_config.api_user_key] = api_user
+			if bearer_token:
+				headers['Authorization'] = f'Bearer {bearer_token}'
 
 			user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
 			# httpx 取余额；被阿里云 WAF 挑战时用真浏览器兜底（能解 JS 挑战）

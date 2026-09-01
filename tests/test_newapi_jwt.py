@@ -153,3 +153,14 @@ class TestProviderConfig:
 		assert p is not None
 		assert p.auth_method == 'newapi_jwt'
 		assert p.domain == 'https://superapi.buzz'
+
+	def test_kuaipao_registered(self):
+		cfg = AppConfig.load_from_env()
+		p = cfg.get_provider('kuaipao')
+		assert p is not None
+		assert p.auth_method == 'newapi_jwt'
+		assert p.domain == 'https://kuaipao.ai'
+		assert p.sign_in_path == '/api/user/checkin'
+		assert p.user_info_path == '/api/user/self'
+		assert p.api_user_key is None
+		assert p.use_proxy is False

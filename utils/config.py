@@ -201,6 +201,19 @@ class AppConfig:
 				use_proxy=False,
 				persist_profile=False,
 			),
+			'kuaipao': ProviderConfig(
+				name='kuaipao',
+				domain='https://kuaipao.ai',
+				login_path='/login',
+				# 与 nianhua/superapi 同构：API 登录（username 字段兼容用户名/邮箱）换
+				# access_token，Bearer 请求主动签到；账号可配用户名而非邮箱
+				sign_in_path='/api/user/checkin',
+				user_info_path='/api/user/self',
+				api_user_key=None,
+				auth_method='newapi_jwt',
+				use_proxy=False,
+				persist_profile=False,
+			),
 			'hcnsec': ProviderConfig(
 				name='hcnsec',
 				domain='https://api.hcnsec.cn',

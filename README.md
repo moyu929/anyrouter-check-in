@@ -8,7 +8,7 @@
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![License](https://img.shields.io/github/license/moyu929/anyrouter-check-in)](LICENSE)
 
-多平台多账号自动签到，支持 **NewAPI** / **OneAPI** 架构平台，内置 `agentrouter`、`gorouter`、`cun`、`gptgod`、`lyclaude`、`nianhua`、`superapi`、`hcnsec`、`guyscode` 等签到分支，其它平台可自定义配置。
+多平台多账号自动签到，支持 **NewAPI** / **OneAPI** 架构平台，内置 `agentrouter`、`gorouter`、`cun`、`gptgod`、`lyclaude`、`nianhua`、`superapi`、`kuaipao`、`hcnsec`、`guyscode` 等签到分支，其它平台可自定义配置。
 
 **维护开源不易，如果本项目帮助到了你，请帮忙点个 Star，谢谢！**
 
@@ -66,7 +66,7 @@ run_check_in_requests()        查余额 → 签到 → 再查余额（WAF 拦�
 | **Session cookies 签到**  | 直接使用用户提供的 cookies → 获取 WAF cookies → 签到      | 仅 WAF 绕过时  |      否       | 手动/自动 | `lyclaude`（Session 模式）、自定义   |
 | **GitHub OAuth 重放签到**  | 重放 GitHub OAuth 授权流程 → 签到（登录自动触发或主动接口）|       否       |      否       | 手动/自动 | `agentrouter`、`gorouter`、`cun`    |
 | **纯 API 签名签到**       | API 登录 → 获取签名参数 → 生成 `_jztz` → 签到             |       否       | 是（`_jztz`） |   手动    | `gptgod`                            |
-| **New-API JWT 签到**      | API 登录换 `access_token` → Bearer 请求 → 主动签到        |       否       |      否       |   手动    | `nianhua`、`superapi`               |
+| **New-API JWT 签到**      | API 登录换 `access_token` → Bearer 请求 → 主动签到        |       否       |      否       |   手动    | `nianhua`、`superapi`、`kuaipao`    |
 | **New-API Session 签到**  | API 登录种 session cookie + 用户 id 头 → 主动签到         |       否       |      否       |   手动    | `hcnsec`（CNY 汇率显示）            |
 
 ### 1.4 签到分支（按提供商划分）
@@ -80,6 +80,7 @@ run_check_in_requests()        查余额 → 签到 → 再查余额（WAF 拦�
 | `lyclaude`    | 邮箱+密码 / Session | 浏览器登录签到 / Session 签到 |      `false`       | NewAPI 标准，WAF 绕过                      |
 | `nianhua`     | 邮箱+密码           | New-API JWT 签到              |      `false`       | 新版 new-api（JWT Bearer），余额单位为美元  |
 | `superapi`    | 邮箱+密码           | New-API JWT 签到              |      `false`       | 新版 new-api（JWT Bearer），余额单位为美元  |
+| `kuaipao`     | 用户名+密码         | New-API JWT 签到              |      `false`       | 与 superapi 同构，`email` 字段填用户名      |
 | `hcnsec`      | 邮箱+密码           | New-API Session 签到          |      `false`       | 老版 new-api，余额按实时汇率以人民币显示    |
 | `guyscode`    | 邮箱+密码           | 纯 API 签到（refresh_token）  |      `false`       | **已搁置**：登录被 Turnstile 强门槛阻断，见 2.5 |
 
@@ -103,7 +104,7 @@ run_check_in_requests()        查余额 → 签到 → 再查余额（WAF 拦�
 
 | 认证方式     | 适用提供商                                                                 | 配置示例                                               | 说明                                   |
 | ------------ | -------------------------------------------------------------------------- | ------------------------------------------------------ | -------------------------------------- |
-| 邮箱+密码    | `gptgod` / `lyclaude` / `nianhua` / `superapi` / `hcnsec` / `guyscode`     | `{"email":"user@ex.com","password":"pass"}`            | 推荐，自动登录                         |
+| 邮箱+密码    | `gptgod` / `lyclaude` / `nianhua` / `superapi` / `kuaipao` / `hcnsec` / `guyscode` | `{"email":"user@ex.com","password":"pass"}`    | 推荐，自动登录；`kuaipao` 的 email 填用户名 |
 | Session      | `lyclaude` / 自定义                                                         | `{"cookies":{"session":"xxx"},"api_user":"12345"}`     | 兼容旧版，需手动获取 cookies           |
 | GitHub OAuth | `agentrouter` / `gorouter` / `cun`                                          | `{"github_session":"your_github_user_session_cookie"}` | 需提供 GitHub 的 `user_session` cookie |
 

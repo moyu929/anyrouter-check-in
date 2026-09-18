@@ -14,6 +14,7 @@ checkin_result.json
 .browser_profiles
 checkin_screenshots
 guyscode_refresh.json
+gptgod_agent_state.json
 log.txt
 .device_fp/
 
@@ -21,3 +22,6 @@ log.txt
 static.cloudflareinsights.com/
 /GOROUTER_RESEARCH.md
 /HANDOFF.md
+/参数.txt
+.pytest-tmp-impl
+.pytest-tmp-impl2

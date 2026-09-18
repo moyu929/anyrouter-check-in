@@ -47,7 +47,7 @@ from utils.checkin_core import build_user_info, is_already_checked, quota_to_cur
 from utils.checkin_core import format_amount as _format_amount
 from utils.config import AccountConfig, AppConfig, load_accounts_config
 from utils.debug import is_debug_enabled, log
-from utils.gptgod import gptgod_checkin
+from utils.gptgod import gptgod_agent_checkin, gptgod_checkin
 from utils.guyscode import guyscode_checkin
 from utils.http_client import API_HEADERS, RetryExhaustedError, create_client, request_with_retry
 from utils.newapi_jwt import newapi_jwt_checkin
@@ -903,14 +903,16 @@ async def check_in_account(
 	proxy_mode = '走代理' if (provider_config.use_proxy and not force_direct) else '直连'
 	log.info(f'{account_name}: 使用提供商 "{account.provider}" ({provider_config.domain})，{proxy_mode}')
 
-	# GPTGod 纯 API 签到（无需浏览器，自带登录+签到全流程）
-	if provider_config.auth_method == 'gptgod':
+	# GPTGod 纯 API 签到（无需浏览器，自带登录+签到全流程；支持网页档/客户端档）
+	if provider_config.auth_method in ('gptgod', 'gptgod_agent'):
 		if not account.has_login_credentials():
 			log.failed(f'{account_name}: GPTGod 提供商需要邮箱和密码')
 			return False, None, {'success': False, 'error': 'GPTGod 提供商需要邮箱和密码'}
 		assert account.email is not None and account.password is not None
-		log.info(f'{account_name}: 正在尝试 GPTGod API 签到...')
-		success, info_before, info_after = gptgod_checkin(
+		tier = '客户端档(God Agent)' if provider_config.auth_method == 'gptgod_agent' else '网页档'
+		log.info(f'{account_name}: 正在尝试 GPTGod {tier} API 签到...')
+		checkin_fn = gptgod_agent_checkin if provider_config.auth_method == 'gptgod_agent' else gptgod_checkin
+		success, info_before, info_after = checkin_fn(
 			account_name,
 			account.email,
 			account.password,

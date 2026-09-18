@@ -26,7 +26,7 @@ class ProviderConfig:
 	use_proxy: bool = False
 	allow_direct_fallback: bool = True
 	persist_profile: bool = False
-	auth_method: Literal['email', 'oauth', 'gptgod', 'guyscode', 'newapi_jwt', 'newapi_session'] | None = None
+	auth_method: Literal['email', 'oauth', 'gptgod', 'gptgod_agent', 'guyscode', 'newapi_jwt', 'newapi_session'] | None = None
 	oauth_client_id: str | None = None
 	oauth_state_path: str = '/api/oauth/state'
 	oauth_callback_path: str = '/api/oauth/github'

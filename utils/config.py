@@ -26,7 +26,7 @@ class ProviderConfig:
 	use_proxy: bool = False
 	allow_direct_fallback: bool = True
 	persist_profile: bool = False
-	auth_method: Literal['email', 'oauth', 'gptgod', 'gptgod_agent', 'guyscode', 'newapi_jwt', 'newapi_session'] | None = None
+	auth_method: Literal['email', 'oauth', 'gptgod', 'gptgod_agent', 'guyscode', 'newapi_jwt', 'newapi_session', 'browser_checkin'] | None = None
 	oauth_client_id: str | None = None
 	oauth_state_path: str = '/api/oauth/state'
 	oauth_callback_path: str = '/api/oauth/github'
@@ -194,10 +194,13 @@ class AppConfig:
 				name='superapi',
 				domain='https://superapi.buzz',
 				login_path='/login',
+				# 全站 Cloudflare 质询（纯净 httpx 一律 403），由浏览器登录 + curl_cffi 分支处理：
+				# CloakBrowser 过质询+填表登录 → 导出 cookies/UA → curl_cffi 模拟 Chrome
+				# 指纹携带 cookies 走 API 签到。turnstile_check=false、github_oauth=false（实测）。
 				sign_in_path='/api/user/checkin',
 				user_info_path='/api/user/self',
 				api_user_key=None,
-				auth_method='newapi_jwt',
+				auth_method='browser_checkin',
 				use_proxy=False,
 				persist_profile=False,
 			),
@@ -238,6 +241,26 @@ class AppConfig:
 				auth_method='oauth',
 				oauth_client_id='Ov23lipURdGRYDGN2jII',
 				# 站点公告明确大陆地区无法直连（Cloudflare），必须走代理
+				use_proxy=True,
+				persist_profile=False,
+			),
+			'justwoker': ProviderConfig(
+				name='justwoker',
+				domain='https://api.justwoker.icu',
+				login_path='/login',
+				# OAuth + 自动签到型（待实机验证"登录是否自动签到"）：
+				# 手动签到接口 /api/user/checkin 实测强制 Cloudflare Turnstile（turnstile_check=true），
+				# 纯 API 无法过验证。按 gorouter 先例改为 sign_in_path=None——若站点属
+				# "登录即自动签到"则在 user_info 请求触发时完成签到，绕过 Turnstile。
+				# 新版协议（POST /api/oauth/state → JWT bearer）由 login_with_github_oauth 自动探测。
+				# /api/status 实测：github_oauth=true、checkin_enabled=true、version=v1.0.0-rc.23、
+				# github_minimum_account_age_days=365。
+				sign_in_path=None,
+				user_info_path='/api/user/self',
+				api_user_key='new-api-user',
+				auth_method='oauth',
+				oauth_client_id='Ov23liBGecTYSePKpXQC',
+				# 站点未声明大陆直连限制；走代理可降低 WAF/风控风险，且 PROVIDERS 通配符可一键覆盖
 				use_proxy=True,
 				persist_profile=False,
 			),

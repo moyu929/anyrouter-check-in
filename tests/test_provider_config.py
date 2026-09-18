@@ -45,6 +45,25 @@ def test_builtin_gorouter_uses_autocheckin_and_oauth(monkeypatch):
 	assert gorouter.oauth_client_id == 'Ov23lipc1Ups6bRqeQYE'
 
 
+def test_builtin_justwoker_oauth_autocheckin(monkeypatch):
+	"""justwoker OAuth 登录 + 自动签到型（sign_in_path=None，登录即视为签到完成）。
+
+	手动签到接口 /api/user/checkin 实测强制 Cloudflare Turnstile，纯 API 无法过验证；
+	按 gorouter 先例走"登录自动签到"路径（user_info 请求触发签到），绕过 Turnstile。
+	"""
+	monkeypatch.delenv('PROVIDERS', raising=False)
+
+	config = AppConfig.load_from_env()
+
+	justwoker = config.providers['justwoker']
+	assert justwoker.domain == 'https://api.justwoker.icu'
+	assert justwoker.sign_in_path is None  # 自动签到，绕过 Turnstile 手动签到接口
+	assert justwoker.needs_manual_check_in() is False
+	assert justwoker.is_oauth() is True
+	assert justwoker.oauth_client_id == 'Ov23liBGecTYSePKpXQC'
+	assert justwoker.api_user_key == 'new-api-user'
+
+
 def test_builtin_cun_uses_oauth_and_manual_checkin(monkeypatch):
 	"""cun 与 agentrouter/gorouter 同为 GitHub OAuth，但需主动调 /api/user/checkin 签到。"""
 	monkeypatch.delenv('PROVIDERS', raising=False)

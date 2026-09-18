@@ -151,7 +151,8 @@ class TestProviderConfig:
 		cfg = AppConfig.load_from_env()
 		p = cfg.get_provider('superapi')
 		assert p is not None
-		assert p.auth_method == 'newapi_jwt'
+		# 2026-09 站点套 Cloudflare 全站质询后改走浏览器登录分支（见 utils/browser_checkin.py）
+		assert p.auth_method == 'browser_checkin'
 		assert p.domain == 'https://superapi.buzz'
 
 	def test_kuaipao_registered(self):

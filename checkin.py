@@ -43,6 +43,7 @@ from utils.browser import (
 	verify_browser_login,
 	wait_for_waf_ready,
 )
+from utils.browser_checkin import browser_checkin
 from utils.checkin_core import build_user_info, is_already_checked, quota_to_currency
 from utils.checkin_core import format_amount as _format_amount
 from utils.config import AccountConfig, AppConfig, load_accounts_config
@@ -932,6 +933,24 @@ async def check_in_account(
 			account.email,
 			account.password,
 			use_proxy=provider_config.use_proxy and not force_direct,
+		)
+		return success, info_before, info_after
+
+	# Cloudflare 全站质询站点（superapi 等）：浏览器登录（过质询）+ curl_cffi API 签到
+	if provider_config.auth_method == 'browser_checkin':
+		if not account.has_login_credentials():
+			log.failed(f'{account_name}: {provider_config.name} 提供商需要邮箱和密码')
+			return False, None, {'success': False, 'error': f'{provider_config.name} 提供商需要邮箱和密码'}
+		assert account.email is not None and account.password is not None
+		log.info(f'{account_name}: 正在尝试 {provider_config.name} 浏览器登录签到...')
+		success, info_before, info_after = browser_checkin(
+			account_name,
+			account.email,
+			account.password,
+			domain=provider_config.domain,
+			provider_name=provider_config.name,
+			use_proxy=provider_config.use_proxy and not force_direct,
+			persist_profile=provider_config.persist_profile,
 		)
 		return success, info_before, info_after
 

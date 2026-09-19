@@ -363,7 +363,7 @@ def _issue_device_token(client: httpx.Client, device_id: str, group_code: str) -
 		)
 		data = resp.json() if resp.status_code == 200 else {}
 		if data.get('code', 0) != 0:
-			raise RuntimeError(f"device/token 返回业务码 {data.get('code')}")
+			raise RuntimeError(f'device/token 返回业务码 {data.get("code")}')
 		token = data.get('token') or (data.get('data') or {}).get('token')
 		if not token:
 			raise RuntimeError('device/token 响应缺少 token')
@@ -446,14 +446,34 @@ def build_agent_risk_snapshot(device: dict) -> list:
 	]
 
 
-def encode_risk_snapshot(key: str, perm: list[int], slots: list) -> str:
+def _risk_key_bytes(key) -> bytes | None:
+	"""风控 key 归一化：兼容 int 字节数组（服务端 2026-09 起返回 [31,48,...]）与字符串（旧格式）。
+
+	返回 16 字节以上的有效密钥字节；无效返回 None。
+	"""
+	if isinstance(key, bytes):
+		kbytes = key
+	elif isinstance(key, str):
+		kbytes = key.encode('utf-8')
+	elif isinstance(key, list) and key and all(isinstance(v, int) and 0 <= v <= 255 for v in key):
+		kbytes = bytes(key)
+	else:
+		return None
+	return kbytes if len(kbytes) >= 16 else None
+
+
+def encode_risk_snapshot(key, perm: list[int], slots: list) -> str:
 	"""客户端 encodeRiskSnapshot 的 Python 实现。
 
 	五步顺序不能动：打乱 → JSON → UTF-8 → 与密钥逐字节 XOR → base64。
+	key 兼容 int 字节数组与字符串两种格式（见 _risk_key_bytes）。
 	"""
+	key_bytes = _risk_key_bytes(key)
+	if key_bytes is None:
+		raise ValueError('风控 key 无效或长度不足')
 	shuffled = [slots[p] for p in perm]
 	raw = json.dumps(shuffled, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
-	xored = bytes(b ^ ord(key[i & 15]) for i, b in enumerate(raw))
+	xored = bytes(b ^ key_bytes[i & 15] for i, b in enumerate(raw))
 	return base64.b64encode(xored).decode('ascii')
 
 
@@ -469,11 +489,15 @@ def _collect_risk_fields(client: httpx.Client, device: dict) -> dict | None:
 		return None
 	sid, field, key = session.get('sid'), session.get('field'), session.get('key')
 	perm = session.get('perm')
-	if session.get('enabled') is False or not sid or not field or not key or not isinstance(perm, list) or len(perm) != 33:
-		log.warn('God Agent 风控会话不可用（enabled=false 或参数缺失）')
-		return None
-	if len(key) < 16:
-		log.warn('God Agent 风控会话 key 长度不足')
+	if (
+		session.get('enabled') is False
+		or not sid
+		or not field
+		or _risk_key_bytes(key) is None
+		or not isinstance(perm, list)
+		or len(perm) != 33
+	):
+		log.warn('God Agent 风控会话不可用（enabled=false 或参数缺失/key 无效）')
 		return None
 	try:
 		encoded = encode_risk_snapshot(key, perm, build_agent_risk_snapshot(device))
@@ -645,7 +669,7 @@ def _make_agent_checkin(
 			# enabled=false 说明站点当前关闭/降级风控：跟随客户端照常签
 			log.warn(f'{account_name}: 风控会话 disabled，按无风控提交')
 			risk_body: dict = {}
-		elif not sid or not field or not key or not isinstance(perm, list) or len(perm) != 33 or len(key) < 16:
+		elif not sid or not field or _risk_key_bytes(key) is None or not isinstance(perm, list) or len(perm) != 33:
 			return False, '风控会话参数不完整（sid/field/key/perm）'
 		else:
 			device = _ensure_device(state)

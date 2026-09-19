@@ -400,6 +400,25 @@ def _extract_oauth_state(state_data: object) -> str | None:
 	return None
 
 
+def _sanitize_cookie_value(value: str, account_name: str) -> str | None:
+	"""校验/清洗 cookie 值：HTTP 头只允许 ASCII 可见字符。
+
+	http2 客户端（h2）对含非 ASCII 的 header 值直接抛 UnicodeEncodeError
+	（'ascii' codec），GitHub 配置的 user_session 若夹杂中文/emoji/误粘贴内容
+	会导致 OAuth 授权请求在发送前就崩溃。剥离非 ASCII 字符后继续尝试，
+	并告警提示用户检查配置；全非 ASCII 则判定无效返回 None。
+	"""
+	cleaned = ''.join(ch for ch in value if 0x20 <= ord(ch) <= 0x7E)
+	if len(cleaned) != len(value):
+		log.warn(
+			f'{account_name}: user_session 含非 ASCII 字符，已剥离部分内容（请检查 github_session 配置，cookie 值仅允许可见 ASCII）'
+		)
+	if not cleaned:
+		log.failed(f'{account_name}: user_session 无有效 ASCII 字符，cookie 可能复制出错')
+		return None
+	return cleaned
+
+
 async def login_with_github_oauth(
 	account_name: str,
 	provider_config,
@@ -508,6 +527,9 @@ async def login_with_github_oauth(
 			return None
 		if not github_client_id:
 			log.failed(f'{account_name}: OAuth client id 未配置')
+			return None
+		github_session = _sanitize_cookie_value(github_session, account_name)
+		if github_session is None:
 			return None
 
 		# Step 2: 用 GitHub user_session 获取授权 code（新版与站点前端一致带 scope）

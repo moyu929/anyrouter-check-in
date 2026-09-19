@@ -10,17 +10,12 @@
 
 import base64
 import json
-import time
 
 import httpx
 import pytest
 
 from utils import gptgod as gptgod_module
-from utils.gptgod import (
-	build_agent_risk_snapshot,
-	encode_risk_snapshot,
-	gptgod_agent_checkin,
-)
+from utils.gptgod import _risk_key_bytes, build_agent_risk_snapshot, encode_risk_snapshot, gptgod_agent_checkin
 
 FAKE_EMAIL = 'agent-tester@example.invalid'
 FAKE_PASSWORD = 'not-a-real-password'
@@ -157,7 +152,13 @@ def scenario_runner(monkeypatch, tmp_path):
 
 class TestBuildAgentRiskSnapshot:
 	def test_has_33_slots(self):
-		device = {'platform': 'Windows', 'machine_id': 'm', 'os_version': 'v', 'install_ts': 100, 'app_version': '0.9.0'}
+		device = {
+			'platform': 'Windows',
+			'machine_id': 'm',
+			'os_version': 'v',
+			'install_ts': 100,
+			'app_version': '0.9.0',
+		}
 
 		slots = build_agent_risk_snapshot(device)
 
@@ -182,7 +183,13 @@ class TestBuildAgentRiskSnapshot:
 		assert a[30] == 12345678
 
 	def test_behavior_slots_vary_between_calls(self):
-		device = {'platform': 'Windows', 'machine_id': 'm', 'os_version': 'v', 'install_ts': 100, 'app_version': '0.9.0'}
+		device = {
+			'platform': 'Windows',
+			'machine_id': 'm',
+			'os_version': 'v',
+			'install_ts': 100,
+			'app_version': '0.9.0',
+		}
 
 		a = build_agent_risk_snapshot(device)
 		b = build_agent_risk_snapshot(device)
@@ -218,6 +225,21 @@ class TestEncodeRiskSnapshot:
 		slots = [i for i in range(33)]
 
 		assert encode_risk_snapshot(_KEY, _PERM, slots) == encode_risk_snapshot(_KEY, _PERM, slots)
+
+	def test_int_byte_array_key_produces_same_output(self):
+		"""服务端 2026-09 起 key 返回 int 字节数组，与同字节字符串输出一致。"""
+		slots = [i for i in range(33)]
+		key_list = [ord(c) for c in _KEY]
+
+		encoded = encode_risk_snapshot(key_list, _PERM, slots)
+
+		assert encoded == encode_risk_snapshot(_KEY, _PERM, slots)
+		assert _risk_key_bytes(key_list) == _KEY.encode('utf-8')
+		assert _risk_key_bytes(_KEY) == _KEY.encode('utf-8')
+		assert _risk_key_bytes([]) is None
+		assert _risk_key_bytes('short') is None  # 不足 16 字节
+		assert _risk_key_bytes(123) is None
+		assert _risk_key_bytes([ord(c) if c != 'a' else 300 for c in _KEY[:16]]) is None  # 越界字节值
 
 
 class TestAgentCheckinFlow:

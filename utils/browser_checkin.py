@@ -27,7 +27,6 @@ from utils.browser import (
 	load_browser_login_settings,
 	prepare_browser_page,
 	submit_login_form,
-	wait_for_logged_in,
 )
 from utils.checkin_core import (
 	failed_info,
@@ -52,6 +51,51 @@ _RETRY_BASE_DELAY_S = 1.0
 # ---------------------------------------------------------------------------
 # 浏览器登录（过 CF 质询 + new-api 邮箱表单）— async，在独立线程事件循环中运行
 # ---------------------------------------------------------------------------
+
+
+async def _is_logged_in(page: 'Page') -> bool:
+	"""判定浏览器已登录：session cookie 存在，或页内 /api/user/self 返回 200。
+
+	不同 new-api fork 的登录态落点不同（session cookie / localStorage JWT）：
+	仅以 cookie 名判定会把 "JWT-only" 的 fork 误判为登录失败，因此增加页内
+	self 接口探测兜底。
+	"""
+	if await has_session_cookie(page):
+		return True
+	try:
+		result = await asyncio.wait_for(
+			page.evaluate(
+				"""async () => {
+                    try {
+                        const r = await fetch('/api/user/self');
+                        return { ok: r.ok, status: r.status };
+                    } catch (e) {
+                        return { ok: false, status: 0 };
+                    }
+                }"""
+			),
+			timeout=10,
+		)
+		return bool(result and result.get('ok') and result.get('status') == 200)
+	except Exception:  # nosec B110
+		return False
+
+
+async def _read_bearer_token(page: 'Page') -> str | None:
+	"""从 localStorage 读取 JWT（兼容 access_token/token/auth_token 三种键名）。"""
+	try:
+		token = await page.evaluate(
+			"""() => {
+                for (const k of ['access_token', 'token', 'auth_token']) {
+                    const v = localStorage.getItem(k);
+                    if (v && v.length >= 32) return v;
+                }
+                return '';
+            }"""
+		)
+		return token or None
+	except Exception:  # nosec B110
+		return None
 
 
 async def _browser_capture_cookies(
@@ -85,15 +129,22 @@ async def _browser_capture_cookies(
 		await page.goto(login_url, wait_until='load', timeout=min(settings.wait_timeout_ms, 60_000))
 
 		# 已登录态快速探测（历史持久化会话复用）
-		logged_in = await wait_for_logged_in(page, 10_000)
-		logged_in = logged_in and await has_session_cookie(page)
+		logged_in = await _is_logged_in(page)
 		if not logged_in:
 			await fill_email_credentials(page, email, password, settings.wait_timeout_ms)
 			await submit_login_form(page, settings.wait_timeout_ms)  # 内含等登录跳转（45s）
-			logged_in = await wait_for_logged_in(page, 60_000)
-			logged_in = logged_in and await has_session_cookie(page)
+			logged_in = await _is_logged_in(page)
 		if not logged_in:
-			log.failed(f'{account_name}: 浏览器登录未成功（未检测到登录态 cookie）')
+			# 诊断信息：登录后落在哪个 URL、有哪些 cookie，便于区分"风控未放行"与"登录失败"
+			try:
+				url_after = page.url
+				cookie_names = [c.get('name') for c in await context.cookies()]
+			except Exception:  # nosec B110
+				url_after, cookie_names = '?', []
+			log.failed(
+				f'{account_name}: 浏览器登录未成功（登录后 URL={url_after}，cookies={cookie_names}，'
+				'未检测到 session cookie 且 /api/user/self 未放行）'
+			)
 			return None
 
 		cookies = await context.cookies()
@@ -101,10 +152,15 @@ async def _browser_capture_cookies(
 		if not cookies:
 			log.failed(f'{account_name}: 登录成功但未取得浏览器 cookies')
 			return None
-		log.detail(f'{account_name}: 浏览器登录成功，取得 {len(cookies)} 个 cookies')
+		bearer_token = await _read_bearer_token(page)
+		log.detail(
+			f'{account_name}: 浏览器登录成功，取得 {len(cookies)} 个 cookies'
+			+ ('，并捕获 Bearer token' if bearer_token else '')
+		)
 		if is_debug_enabled():
 			log.detail(f'{account_name}: UA={ua[:60]}...')
-		return {'cookies': cookies, 'ua': ua}
+			log.detail(f'{account_name}: cookies={[c.get("name") for c in cookies]}')
+		return {'cookies': cookies, 'ua': ua, 'bearer_token': bearer_token}
 	except Exception as e:
 		log.failed(f'{account_name}: 浏览器登录异常: {e}')
 		return None
@@ -152,16 +208,25 @@ def _browser_capture_sync(
 # ---------------------------------------------------------------------------
 
 
-def _make_cffi_session(cookies: list, ua: str, *, use_proxy: bool) -> CffiSession:
+def _make_cffi_session(
+	cookies: list,
+	ua: str,
+	*,
+	use_proxy: bool,
+	bearer_token: str | None = None,
+) -> CffiSession:
 	"""创建带浏览器指纹与 cookies 的 curl_cffi 会话。
 
 	verify=False：curl_cffi 在 Windows 下的 CA 搜索路径异常（curl 默认 CAfile 解析错误），
 	影响 HTTPS 握手；此处只读公开签到 API 并携带 cf_clearance 登录态，关闭证书校验不影响
 	业务正确性。
+	bearer_token：部分 fork 登录态走 localStorage JWT 而非 session cookie，注入 Bearer 头。
 	"""
 	session = CffiSession(impersonate=_CFFI_IMPERSONATE, timeout=30, verify=False)
 	try:
 		session.headers['User-Agent'] = ua
+		if bearer_token:
+			session.headers['Authorization'] = f'Bearer {bearer_token}'
 		for c in cookies:
 			name = c.get('name')
 			value = c.get('value')
@@ -266,7 +331,12 @@ def browser_checkin(
 			if not data:
 				return False
 			try:
-				session = _make_cffi_session(data['cookies'], data['ua'], use_proxy=use_proxy)
+				session = _make_cffi_session(
+					data['cookies'],
+					data['ua'],
+					use_proxy=use_proxy,
+					bearer_token=data.get('bearer_token'),
+				)
 			except Exception as e:
 				log.failed(f'{account_name}: {e}')
 				return False

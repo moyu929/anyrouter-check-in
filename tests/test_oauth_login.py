@@ -130,6 +130,35 @@ class TestLoginWithGithubOauth:
 		gh_request = next(r for r in server.requests if r.url.host == 'github.com')
 		assert FAKE_GH_SESSION in gh_request.headers.get('cookie', '')
 
+	async def test_github_session_with_non_ascii_is_sanitized(self, monkeypatch, run_oauth):
+		"""user_session 夹杂非 ASCII 字符时剥离后仍可发送（防 http2 ascii 编码崩溃）。"""
+		server = _OAuthServer()
+		monkeypatch.setattr(
+			checkin_module,
+			'create_client',
+			lambda **_kwargs: httpx.Client(transport=httpx.MockTransport(server)),
+		)
+
+		await login_with_github_oauth('Account 1', PROVIDER, 'fake-github-中文session')
+
+		gh_request = next(r for r in server.requests if r.url.host == 'github.com')
+		assert 'fake-github-session' in gh_request.headers.get('cookie', '')
+		assert '中文' not in gh_request.headers.get('cookie', '')
+
+	async def test_github_session_all_non_ascii_fails(self, monkeypatch):
+		"""user_session 全部非 ASCII → 判定无效，不发起 GitHub 授权请求（返回 None）。"""
+		server = _OAuthServer()
+		monkeypatch.setattr(
+			checkin_module,
+			'create_client',
+			lambda **_kwargs: httpx.Client(transport=httpx.MockTransport(server)),
+		)
+
+		result = await login_with_github_oauth('Account 1', PROVIDER, '中文无效值')
+
+		assert result is None
+		assert not [r for r in server.requests if r.url.host == 'github.com']
+
 	async def test_github_response_cookies_are_not_returned_for_provider(self, run_oauth):
 		class CookieServer(_OAuthServer):
 			def __call__(self, request: httpx.Request) -> httpx.Response:

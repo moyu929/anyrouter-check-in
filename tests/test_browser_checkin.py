@@ -53,7 +53,7 @@ def _patch_authenticate(mocker, login_data, self_payload, checkin_payload):
 	"""统一替换浏览器登录与 curl_cffi 会话构造。"""
 	mocker.patch.object(bc, '_browser_capture_sync', return_value=login_data)
 
-	def _make(cookies, ua, *, use_proxy):
+	def _make(cookies, ua, *, use_proxy, bearer_token=None):
 		return FakeSession(
 			[
 				('/api/user/self', self_payload),
@@ -114,6 +114,15 @@ def test_make_cffi_session_injects_cookies_and_ua():
 	try:
 		assert session.headers.get('User-Agent') == _UA
 		assert 'cf_clearance' in list(session.cookies.keys())
+	finally:
+		session.close()
+
+
+def test_make_cffi_session_injects_bearer_token():
+	"""提供 bearer_token 时注入 Authorization 头。"""
+	session = bc._make_cffi_session(_COOKIES, _UA, use_proxy=False, bearer_token='abc' * 12)
+	try:
+		assert session.headers.get('Authorization') == f'Bearer {"abc" * 12}'
 	finally:
 		session.close()
 

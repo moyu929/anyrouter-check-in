@@ -477,15 +477,36 @@ def encode_risk_snapshot(key, perm: list[int], slots: list) -> str:
 	return base64.b64encode(xored).decode('ascii')
 
 
+def _parse_risk_session(resp) -> dict | None:
+	"""解包 native-session 响应 → 风控会话 dict（兼容两种结构）。
+
+	服务端 2026-09 起返回 {code:0, msg:'ok', data:{enabled,sid,field,key,perm,slots}}；
+	旧版本字段可能直接在顶层。返回风控会话 dict；无效返回 None。
+	"""
+	try:
+		payload = resp.json() if resp.status_code == 200 else {}
+	except Exception:  # nosec B110
+		payload = {}
+	if not isinstance(payload, dict):
+		return None
+	data = payload.get('data')
+	if isinstance(data, dict):
+		return data
+	if any(k in payload for k in ('sid', 'field', 'perm')):
+		return payload
+	return None
+
+
 def _collect_risk_fields(client: httpx.Client, device: dict) -> dict | None:
 	"""取一次性风控会话并编码，返回 {_k, <field>: encoded}；失败返回 None（需中断）。"""
 	try:
 		resp = request_with_retry(client, 'GET', f'{BASE}/api/user/risk/native-session', timeout=30)
-		session = resp.json() if resp.status_code == 200 else {}
+		session = _parse_risk_session(resp)
 	except Exception as e:  # nosec B112
 		log.warn(f'God Agent 风控会话获取失败: {e}')
 		return None
-	if not isinstance(session, dict):
+	if session is None:
+		log.warn('God Agent 风控会话响应格式错误')
 		return None
 	sid, field, key = session.get('sid'), session.get('field'), session.get('key')
 	perm = session.get('perm')
@@ -656,11 +677,11 @@ def _make_agent_checkin(
 		# 风控会话必须每次重新取（一次性、服务端读完即删、10 分钟过期）
 		try:
 			resp = request_with_retry(client, 'GET', f'{BASE}/api/user/risk/native-session', timeout=30)
-			session = resp.json() if resp.status_code == 200 else {}
+			session = _parse_risk_session(resp)
 		except Exception as e:
 			return False, f'获取风控会话失败: {e}'
 
-		if not isinstance(session, dict):
+		if session is None:
 			return False, '风控会话响应格式错误'
 		sid, field, key = session.get('sid'), session.get('field'), session.get('key')
 		perm = session.get('perm')

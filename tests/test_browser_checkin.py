@@ -1,5 +1,8 @@
 """browser_checkin 分支测试（全 mock：浏览器登录与 curl_cffi 会话均离线替换）"""
 
+import asyncio
+from types import SimpleNamespace
+
 import utils.browser_checkin as bc
 from utils.browser_checkin import browser_checkin
 
@@ -136,3 +139,68 @@ def test_browser_capture_missing_cookies_returns_none(mocker):
 	mocker.patch.object(bc, '_browser_capture_sync', side_effect=lambda **kw: None)
 	ok, before, after = browser_checkin('cfg-test', 'a@b.c', 'pw', 'https://superapi.buzz')
 	assert ok is False
+
+
+class _FakeContext:
+	"""cookies() 可编程的假 context。"""
+
+	def __init__(self, cookie_names: list[str]):
+		self._names = cookie_names
+
+	async def cookies(self):
+		return [{'name': n, 'value': 'v'} for n in self._names]
+
+
+class _FakePage:
+	"""够用即可的假 Page：on('request') 捕获 + goto 触发 + evaluate 可编程。"""
+
+	def __init__(self, *, cookie_names: list[str] = (), self_status: int = 0, request_auth: str = ''):
+		self.context = _FakeContext(cookie_names)
+		self._self_status = self_status
+		self._request_auth = request_auth
+		self._handlers: list[tuple[str, callable]] = []
+		self.goto_urls: list[str] = []
+
+	def on(self, event: str, handler) -> None:
+		self._handlers.append((event, handler))
+
+	async def goto(self, url: str, **kwargs) -> None:
+		self.goto_urls.append(url)
+		if self._request_auth:
+			for event, handler in self._handlers:
+				if event == 'request':
+					handler(
+						SimpleNamespace(
+							headers={'authorization': self._request_auth}, url='https://superapi.buzz/api/user/models'
+						)
+					)
+
+	async def evaluate(self, script, *args):
+		# 仅被 _is_logged_in 的 self 兜底探测调用
+		if 'fetch' in script:
+			return {'ok': True, 'status': self._self_status}
+		return ''
+
+
+def test_is_logged_in_detects_new_api_cookie():
+	"""新版 new-api fork 的登录态 cookie（new_api_has_session）可被识别。"""
+	page = _FakePage(cookie_names=['cf_clearance', 'new_api_has_session'])
+
+	assert asyncio.run(bc._is_logged_in(page)) is True
+
+
+def test_is_logged_in_falls_back_to_self_api():
+	"""无登录态 cookie 时以页内 /api/user/self 探测兜底。"""
+	page = _FakePage(cookie_names=['cf_clearance'], self_status=200)
+
+	assert asyncio.run(bc._is_logged_in(page)) is True
+
+
+def test_capture_bearer_token_from_network():
+	"""从网络层捕获前端实际发送的 Bearer token。"""
+	page = _FakePage(request_auth='Bearer fake-jwt-abcdefgh')
+
+	token = asyncio.run(bc._capture_bearer_token(page, 'https://superapi.buzz', 'probe'))
+
+	assert token == 'fake-jwt-abcdefgh'
+	assert page.goto_urls and page.goto_urls[0].endswith(bc._DASHBOARD_PATH)

@@ -22,7 +22,6 @@ from curl_cffi.requests import Session as CffiSession
 
 from utils.browser import (
 	fill_email_credentials,
-	has_session_cookie,
 	launch_login_context,
 	load_browser_login_settings,
 	prepare_browser_page,
@@ -47,6 +46,13 @@ _CFFI_IMPERSONATE = 'chrome'
 _RETRY_TIMES = 3
 _RETRY_BASE_DELAY_S = 1.0
 
+# 各 new-api fork 的登录态 cookie 名（老版 session；新版 rc.30+ new_api_refresh / new_api_has_session）
+_LOGGED_IN_COOKIE_NAMES = frozenset({'session', 'new_api_refresh', 'new_api_has_session'})
+# 登录后触发前端带 Bearer 请求的页面路径（new-api /console）
+_DASHBOARD_PATH = '/dashboard/overview'
+# Bearer token 网络捕获最长等待
+_BEARER_CAPTURE_TIMEOUT_MS = 12_000
+
 
 # ---------------------------------------------------------------------------
 # 浏览器登录（过 CF 质询 + new-api 邮箱表单）— async，在独立线程事件循环中运行
@@ -54,13 +60,15 @@ _RETRY_BASE_DELAY_S = 1.0
 
 
 async def _is_logged_in(page: 'Page') -> bool:
-	"""判定浏览器已登录：session cookie 存在，或页内 /api/user/self 返回 200。
+	"""判定浏览器已登录：任一登录态 cookie 存在，或页内 /api/user/self 返回 200。
 
-	不同 new-api fork 的登录态落点不同（session cookie / localStorage JWT）：
-	仅以 cookie 名判定会把 "JWT-only" 的 fork 误判为登录失败，因此增加页内
-	self 接口探测兜底。
+	不同 new-api fork 的登录态落点不同：老版种 `session` cookie，新版（rc.30+，
+	superapi 实测）种 `new_api_refresh` + `new_api_has_session`，仅以单一 cookie 名
+	判定会把新 fork 误判为登录失败；另有纯 localStorage JWT 的 fork，故再以页内
+	self 接口探测兜底（原生 fetch 不带 Bearer，仅对 cookie 鉴权的旧 fork 有效）。
 	"""
-	if await has_session_cookie(page):
+	names = {c.get('name') for c in await page.context.cookies()}
+	if names & _LOGGED_IN_COOKIE_NAMES:
 		return True
 	try:
 		result = await asyncio.wait_for(
@@ -96,6 +104,39 @@ async def _read_bearer_token(page: 'Page') -> str | None:
 		return token or None
 	except Exception:  # nosec B110
 		return None
+
+
+async def _capture_bearer_token(page: 'Page', domain: str, account_name: str) -> str | None:
+	"""从网络层捕获前端实际使用的 Bearer access token。
+
+	新版 new-api（rc.30+，superapi 实测）：登录后仅种 new_api_refresh/鉴权靠
+	refresh token 换发的 JWT（仅存内存、不落 localStorage/cookie）。此处监听
+	带 `Authorization: Bearer` 的域内请求，并导航一次控制台页触发前端发请求。
+	返回 token 或 None（不影响登录态判定，仅影响后续 API 鉴权）。
+	"""
+	holder: dict = {'event': asyncio.Event(), 'token': None}
+	origin = domain.rstrip('/')
+
+	def on_request(request) -> None:
+		if holder['token']:
+			return
+		auth = request.headers.get('authorization', '')
+		if auth.startswith('Bearer ') and request.url.startswith(origin):
+			holder['token'] = auth[len('Bearer ') :]
+			holder['event'].set()
+
+	page.on('request', on_request)
+	try:
+		await page.goto(f'{origin}{_DASHBOARD_PATH}', wait_until='load', timeout=30_000)
+	except Exception:  # nosec B112
+		pass
+	try:
+		await asyncio.wait_for(holder['event'].wait(), timeout=_BEARER_CAPTURE_TIMEOUT_MS / 1000)
+	except asyncio.TimeoutError:
+		pass
+	if holder['token']:
+		log.detail(f'{account_name}: 已从网络层捕获 Bearer access token（{len(holder["token"])} 字符）')
+	return holder['token']
 
 
 async def _browser_capture_cookies(
@@ -153,6 +194,9 @@ async def _browser_capture_cookies(
 			log.failed(f'{account_name}: 登录成功但未取得浏览器 cookies')
 			return None
 		bearer_token = await _read_bearer_token(page)
+		if not bearer_token:
+			# 新版 fork 的 access token 仅存内存：从网络层捕获
+			bearer_token = await _capture_bearer_token(page, domain, account_name)
 		log.detail(
 			f'{account_name}: 浏览器登录成功，取得 {len(cookies)} 个 cookies'
 			+ ('，并捕获 Bearer token' if bearer_token else '')
@@ -346,12 +390,16 @@ def browser_checkin(
 			account_name,
 			unit='usd',
 			authenticate=authenticate,
-			fetch_user_info=lambda: _get_user_info(session, domain, account_name)
-			if session is not None
-			else failed_info('登录客户端未初始化'),
-			perform_checkin=lambda: _perform_checkin(session, domain, account_name)
-			if session is not None
-			else (False, '登录客户端未初始化'),
+			fetch_user_info=lambda: (
+				_get_user_info(session, domain, account_name)
+				if session is not None
+				else failed_info('登录客户端未初始化')
+			),
+			perform_checkin=lambda: (
+				_perform_checkin(session, domain, account_name)
+				if session is not None
+				else (False, '登录客户端未初始化')
+			),
 		)
 	finally:
 		if session is not None:

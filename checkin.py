@@ -51,8 +51,7 @@ from utils.debug import is_debug_enabled, log
 from utils.gptgod import gptgod_agent_checkin, gptgod_checkin
 from utils.guyscode import guyscode_checkin
 from utils.http_client import API_HEADERS, RetryExhaustedError, create_client, request_with_retry
-from utils.newapi_jwt import newapi_jwt_checkin
-from utils.newapi_session import newapi_session_checkin
+from utils.newapi import newapi_checkin
 from utils.notify import notify
 from utils.proxy import get_playwright_proxy, get_proxy_server, is_proxy_configured, needs_proxy, redact_proxy_url
 from utils.proxy_selector import NodeSelector, available, current_proxy_node, no_available_node
@@ -976,30 +975,14 @@ async def check_in_account(
 		)
 		return success, info_before, info_after
 
-	# New-API JWT 纯 API 签到（新版 new-api：登录免 Turnstile，全程 httpx）
-	if provider_config.auth_method == 'newapi_jwt':
+	# New-API 纯 API 签到（新版 JWT / 老版 session 协议与显示币种均自适应，全程 httpx）
+	if provider_config.auth_method == 'newapi':
 		if not account.has_login_credentials():
 			log.failed(f'{account_name}: {provider_config.name} 提供商需要邮箱和密码')
 			return False, None, {'success': False, 'error': f'{provider_config.name} 提供商需要邮箱和密码'}
 		assert account.email is not None and account.password is not None
 		log.info(f'{account_name}: 正在尝试 {provider_config.name} 纯 API 签到...')
-		success, info_before, info_after = newapi_jwt_checkin(
-			account_name,
-			account.email,
-			account.password,
-			domain=provider_config.domain,
-			use_proxy=provider_config.use_proxy and not force_direct,
-		)
-		return success, info_before, info_after
-
-	# 老版 New-API 纯 API 签到（hcnsec 等：邮箱 API 登录 + session cookie + New-Api-User 头）
-	if provider_config.auth_method == 'newapi_session':
-		if not account.has_login_credentials():
-			log.failed(f'{account_name}: {provider_config.name} 提供商需要邮箱和密码')
-			return False, None, {'success': False, 'error': f'{provider_config.name} 提供商需要邮箱和密码'}
-		assert account.email is not None and account.password is not None
-		log.info(f'{account_name}: 正在尝试 {provider_config.name} 纯 API 签到...')
-		success, info_before, info_after = newapi_session_checkin(
+		success, info_before, info_after = newapi_checkin(
 			account_name,
 			account.email,
 			account.password,

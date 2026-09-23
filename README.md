@@ -29,8 +29,7 @@
 | `utils/proxy.py`                | 按提供商 `use_proxy` 读取代理、连通性探测与直连回退                                 |
 | `utils/proxy_selector.py`       | mihomo REST API 节点选择器：按区域优先级选最低延迟可用节点，维护全局排除集合        |
 | `utils/gptgod.py`               | GPTGod 纯 API 分支：`_jztz` 签名算法（仅保留差异逻辑，流程由中枢编排）              |
-| `utils/newapi_jwt.py`           | 新版 New-API 站点纯 API 分支（JWT Bearer 认证）                                     |
-| `utils/newapi_session.py`       | 老版 New-API 站点纯 API 分支（session cookie + `New-Api-User` 头，支持 CNY 汇率）  |
+| `utils/newapi.py`               | New-API 站点纯 API 分支（登录协议 JWT/session 与显示币种 USD/CNY 双自适应）        |
 | `utils/guyscode.py`             | Guyscode 分支：refresh_token 续期 + 浏览器登录捕获 JWT（已搁置，见 2.5）            |
 | `utils/notify.py`               | 10 个通知渠道，逐个独立发送、互不阻塞；支持 Markdown 正文与渠道自动适配             |
 | `utils/debug.py`                | 统一日志前缀与 `DEBUG_MODE` 开关                                                    |
@@ -45,7 +44,7 @@ AppConfig.load_from_env()      内置 8 个提供商 + PROVIDERS 覆盖
 load_accounts_config()         ANYROUTER_ACCOUNTS 校验
   ↓
 逐账号 check_in_account()      （use_proxy 账号由 check_in_account_with_retry 包裹节点切换重试）
-  ├─ gptgod / guyscode / newapi_jwt / newapi_session / browser_checkin
+  ├─ gptgod / guyscode / newapi / browser_checkin
   │     → 各自分支模块（仅差异逻辑）→ checkin_core.run_standard_checkin 统一编排
   ├─ auth_method == "oauth"    → GitHub OAuth 三段式重放（登录即签到）
   ├─ 配置了 email + password   → 浏览器登录取 cookies → HTTP 签到
@@ -66,8 +65,7 @@ run_check_in_requests()        查余额 → 签到 → 再查余额（WAF 拦�
 | **Session cookies 签到**  | 直接使用用户提供的 cookies → 获取 WAF cookies → 签到      | 仅 WAF 绕过时  |      否       | 手动/自动 | `lyclaude`（Session 模式）、自定义   |
 | **GitHub OAuth 重放签到**  | 重放 GitHub OAuth 授权流程 → 签到（登录自动触发或主动接口）|       否       |      否       | 手动/自动 | `agentrouter`、`gorouter`、`cun`    |
 | **纯 API 签名签到**       | API 登录 → 获取签名参数 → 生成 `_jztz` → 签到             |       否       | 是（`_jztz`） |   手动    | `gptgod`                            |
-| **New-API JWT 签到**      | API 登录换 `access_token` → Bearer 请求 → 主动签到        |       否       |      否       |   手动    | `nianhua`、`kuaipao`                |
-| **New-API Session 签到**  | API 登录种 session cookie + 用户 id 头 → 主动签到         |       否       |      否       |   手动    | `hcnsec`（CNY 汇率显示）            |
+| **New-API 签到（协议自适应）** | API 登录 → 自动识别 JWT / session 鉴权 → 主动签到；显示币种按 `/api/status` 自动识别 | 否 | 否 | 手动 | `nianhua`、`kuaipao`、`hcnsec` |
 | **浏览器登录 + curl_cffi** | 浏览器过 CF 质询并填表登录 → 导出 cookies/UA → curl_cffi 模拟 Chrome 指纹带 cookies 签到 | 是 | 否 | 手动 | `superapi` |
 
 ### 1.4 签到分支（按提供商划分）
@@ -80,10 +78,10 @@ run_check_in_requests()        查余额 → 签到 → 再查余额（WAF 拦�
 | `justwoker`   | GitHub OAuth        | GitHub OAuth 重放签到         |       `true`       | OAuth 登录 + 自动签到（待实机验证）：主动签到接口被 Turnstile 拦截，按 gorouter 先例走登录自动签到路径 |
 | `gptgod`      | 邮箱+密码           | 纯 API 签名签到               |      `false`       | 无需浏览器，签名算法反爬，余额单位为积分    |
 | `lyclaude`    | 邮箱+密码 / Session | 浏览器登录签到 / Session 签到 |      `false`       | NewAPI 标准，WAF 绕过                      |
-| `nianhua`     | 邮箱+密码           | New-API JWT 签到              |      `false`       | **已被 Turnstile 强制门槛阻断**（2026-09-19 实测 `turnstile_check=true`，登录接口强制人机验证且 CDN 慢速黑洞拦截自动化浏览器），待站点放开后恢复 |
+| `nianhua`     | 邮箱+密码           | New-API 签到（自适应）        |      `false`       | **已被 Turnstile 强制门槛阻断**（2026-09-19 实测 `turnstile_check=true`，登录接口强制人机验证且 CDN 慢速黑洞拦截自动化浏览器），待站点放开后恢复 |
 | `superapi`    | 邮箱+密码           | 浏览器登录 + curl_cffi 签到    |      `false`       | 全站 Cloudflare 质询（纯 API 一律 403），须浏览器过质询；`turnstile_check=false`；**建议 PROVIDERS 中单独设 `"superapi": {"use_proxy": false}` 直连** |
-| `kuaipao`     | 用户名+密码         | New-API JWT 签到              |      `false`       | 与 superapi 同构，`email` 字段填用户名      |
-| `hcnsec`      | 邮箱+密码           | New-API Session 签到          |      `false`       | 老版 new-api，余额按实时汇率以人民币显示    |
+| `kuaipao`     | 用户名+密码         | New-API 签到（自适应）        |      `false`       | `email` 字段填用户名；币种 CUSTOM，暂按美元显示 |
+| `hcnsec`      | 邮箱+密码           | New-API 签到（自适应）        |      `false`       | 2026-09 站点升级至新版 JWT 协议（rc.40）；余额按实时汇率以人民币显示 |
 | `guyscode`    | 邮箱+密码           | 纯 API 签到（refresh_token）  |      `false`       | **已搁置**：登录被 Turnstile 强门槛阻断，见 2.5 |
 
 > **代理生效范围**：代理按提供商粒度启用。即使已设置 `CHECKIN_PROXY_URL`，`use_proxy=false` 的提供商仍然直连；可通过 `PROVIDERS` 覆盖每个提供商的 `use_proxy`。

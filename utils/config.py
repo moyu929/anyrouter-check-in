@@ -26,7 +26,7 @@ class ProviderConfig:
 	use_proxy: bool = False
 	allow_direct_fallback: bool = True
 	persist_profile: bool = False
-	auth_method: Literal['email', 'oauth', 'gptgod', 'gptgod_agent', 'guyscode', 'newapi_jwt', 'newapi_session', 'browser_checkin'] | None = None
+	auth_method: Literal['email', 'oauth', 'gptgod', 'gptgod_agent', 'guyscode', 'newapi', 'browser_checkin'] | None = None
 	oauth_client_id: str | None = None
 	oauth_state_path: str = '/api/oauth/state'
 	oauth_callback_path: str = '/api/oauth/github'
@@ -182,11 +182,11 @@ class AppConfig:
 				name='nianhua',
 				domain='https://us-3.nianhuaapi.com',
 				login_path='/login',
-				# 新版 new-api（JWT Bearer）由独立分支 newapi_jwt_checkin 处理
+				# new-api 系（登录协议 JWT/session 与显示币种均自适应）由统一分支处理
 				sign_in_path='/api/user/checkin',
 				user_info_path='/api/user/self',
 				api_user_key=None,
-				auth_method='newapi_jwt',
+				auth_method='newapi',
 				use_proxy=False,
 				persist_profile=False,
 			),
@@ -208,12 +208,12 @@ class AppConfig:
 				name='kuaipao',
 				domain='https://kuaipao.ai',
 				login_path='/login',
-				# 与 nianhua/superapi 同构：API 登录（username 字段兼容用户名/邮箱）换
+				# 与 nianhua/hcnsec 同构：API 登录（username 字段兼容用户名/邮箱）换
 				# access_token，Bearer 请求主动签到；账号可配用户名而非邮箱
 				sign_in_path='/api/user/checkin',
 				user_info_path='/api/user/self',
 				api_user_key=None,
-				auth_method='newapi_jwt',
+				auth_method='newapi',
 				use_proxy=False,
 				persist_profile=False,
 			),
@@ -221,11 +221,11 @@ class AppConfig:
 				name='hcnsec',
 				domain='https://api.hcnsec.cn',
 				login_path='/login',
-				# 老版 new-api（邮箱 API 登录 + session cookie + New-Api-User 头）由独立分支处理
+				# 该站 2026-09 从老版 session 协议升级到新版 JWT（rc.40），协议识别由统一分支处理
 				sign_in_path='/api/user/checkin',
 				user_info_path='/api/user/self',
-				api_user_key='new-api-user',
-				auth_method='newapi_session',
+				api_user_key=None,
+				auth_method='newapi',
 				use_proxy=False,
 				persist_profile=False,
 			),

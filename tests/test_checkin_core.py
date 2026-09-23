@@ -26,7 +26,7 @@ class TestPurity:
 		code = (
 			'import sys; import utils.checkin_core; '
 			"bad = [n for n in ('checkin', 'utils.gptgod', 'utils.guyscode', "
-			"'utils.newapi_jwt', 'utils.newapi_session') if n in sys.modules]; "
+			"'utils.newapi') if n in sys.modules]; "
 			'print(",".join(bad))'
 		)
 		result = subprocess.run(

@@ -4,10 +4,10 @@
 架构约定（重要）：
   * 本模块是"中枢"，只依赖 utils.debug / utils.http_client，**严禁反向导入**
     checkin.py 或任何签到分支（utils/gptgod.py、utils/guyscode.py、
-    utils/newapi_jwt.py、utils/newapi_session.py），否则形成循环导入。
+    utils/newapi.py），否则形成循环导入。
   * 签到分支只保留差异逻辑（认证方式、余额字段、签到协议），标准流程
     （认证 → 前余额 → 签到 → 落库等待 → 后余额）统一由 run_standard_checkin 编排。
-  * new-api 系（jwt/session 两分支）的共享协议（登录、self 解析、签到响应
+  * new-api 系（newapi 分支）的共享协议（登录、self 解析、签到响应
     解析）也收敛在本模块；core 不创建/持有 client，请求复用调用方传入的 client。
   * time.sleep 必须经模块属性调用（time.sleep(...)），测试通过 patch
     time 模块属性消除等待；写成 from time import sleep 会绕开 patch。
@@ -104,10 +104,9 @@ def login_failed_info(unit: str = 'usd') -> dict:
 def newapi_login(client, domain: str, email: str, password: str, account_name: str) -> dict | None:
 	"""new-api 系通用登录：POST /api/user/login，body {username, password}。
 
-	jwt 分支（newapi_jwt）与 session 分支（newapi_session）登录协议完全一致，
-	仅提取字段不同（access_token vs data.id），故请求与错误处理收敛于此。
-	成功返回 data payload dict（字段提取留在分支），失败返回 None（日志已输出）。
-	请求复用调用方传入的 client（session 分支靠它种 cookie）。
+	各 new-api 分支登录协议完全一致，仅提取字段不同（access_token vs data.id），
+	故请求与错误处理收敛于此。成功返回 data payload dict（字段提取留在分支），
+	失败返回 None（日志已输出）。请求复用调用方传入的 client（老版 session 协议靠它种 cookie）。
 	"""
 	try:
 		resp = request_with_retry(
